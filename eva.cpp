@@ -97,6 +97,28 @@ struct eva_vision_layer {
     struct ggml_tensor * b3;
 };
 
+struct eva_text_layer {
+    // normalization
+    struct ggml_tensor * norm1_weight;
+    struct ggml_tensor * norm1_bias;
+
+    // attention
+    struct ggml_tensor * in_proj_weight;
+    struct ggml_tensor * in_proj_bias;
+    struct ggml_tensor * out_proj_weight;
+    struct ggml_tensor * out_proj_bias;
+
+    // normalization
+    struct ggml_tensor * norm2_weight;
+    struct ggml_tensor * norm2_bias;
+
+    //mlp
+    struct ggml_tensor * c_fc_weight;
+    struct ggml_tensor * c_fc_bias;
+    struct ggml_tensor * c_proj_weight;
+    struct ggml_tensor * c_proj_bias;
+};
+
 struct eva_vision_model {
     struct ggml_tensor * cls_token;
     struct ggml_tensor * pos_embeddings;
@@ -111,10 +133,21 @@ struct eva_vision_model {
     struct ggml_tensor * head_bias;
 };
 
+struct eva_text_model {
+    struct ggml_tensor * pos_embeddings;
+    struct ggml_tensor * text_proj;
+    struct ggml_tensor * token_embed;
+    std::vector<eva_text_layer> layers;
+    struct ggml_tensor * ln_final_weight;
+    struct ggml_tensor * ln_final_bias;
+};
+
 struct eva_model {
     eva_hparams hparams;
 
+    struct ggml_tensor * logit_scale;
     struct eva_vision_model vision_model;
+    struct eva_text_model text_model;
 
     struct ggml_context * ctx;
     std::unordered_map<std::string, struct ggml_tensor *> tensors;
@@ -230,7 +263,7 @@ static bool eva_model_load(
         fin.read((char *) &flag,  sizeof(flag));
         text_hparams.xattn = (bool)flag;
         fin.read((char *) &flag,  sizeof(flag));
-        text_hparams.fusedLN = (int)flag;
+        text_hparams.fusedLN = (bool)flag;
 
         fin.read((char *) &vision_hparams.mlp_ratio, sizeof(vision_hparams.mlp_ratio));
 
@@ -238,17 +271,18 @@ static bool eva_model_load(
 
         //n_ff = ((2*(4*hparams.n_embd)/3 + hparams.n_mult - 1)/hparams.n_mult)*hparams.n_mult;
 
-        fprintf(stderr, "%s: n_embd  = %d\n", __func__, hparams.n_embd);
-        fprintf(stderr, "%s: n_ctx   = %d\n", __func__, vision_hparams.image_size);
-        fprintf(stderr, "%s: n_layer = %d\n", __func__, vision_hparams.layers);
-        fprintf(stderr, "%s: n_head  = %d\n", __func__, vision_hparams.width);
-        fprintf(stderr, "%s: n_head  = %d\n", __func__, vision_hparams.head_width);
-        fprintf(stderr, "%s: n_head  = %d\n", __func__, vision_hparams.patch_size);
-        fprintf(stderr, "%s: n_head  = %d\n", __func__, text_hparams.context_length);
-        fprintf(stderr, "%s: n_vocab = %d\n", __func__, text_hparams.vocab_size);
-        fprintf(stderr, "%s: n_head  = %d\n", __func__, text_hparams.width);
+        fprintf(stderr, "%s: n_embd = %d\n", __func__, hparams.n_embd);
+        fprintf(stderr, "%s: image_size = %d\n", __func__, vision_hparams.image_size);
+        fprintf(stderr, "%s: n_layers = %d\n", __func__, vision_hparams.layers);
+        fprintf(stderr, "%s: width  = %d\n", __func__, vision_hparams.width);
+        fprintf(stderr, "%s: head_width  = %d\n", __func__, vision_hparams.head_width);
+        fprintf(stderr, "%s: patch_size  = %d\n", __func__, vision_hparams.patch_size);
+
+        fprintf(stderr, "%s: context_length  = %d\n", __func__, text_hparams.context_length);
+        fprintf(stderr, "%s: vocab_size = %d\n", __func__, text_hparams.vocab_size);
+        fprintf(stderr, "%s: width  = %d\n", __func__, text_hparams.width);
         fprintf(stderr, "%s: n_head  = %d\n", __func__, text_hparams.heads);
-        fprintf(stderr, "%s: n_layer = %d\n", __func__, text_hparams.layers);
+        fprintf(stderr, "%s: n_layers = %d\n", __func__, text_hparams.layers);
     }
 
     // for the big tensors, we have the option to store the data in 16-bit floats or quantized
@@ -273,8 +307,9 @@ static bool eva_model_load(
         const int head_width   = hparams.vision_hparams.head_width;  //64
         const int n_layers   = hparams.vision_hparams.layers;  //12
         const float mlp_ratio   = hparams.vision_hparams.mlp_ratio;  //2.6667
-        const int n_mlp   = (int)(n_embd*mlp_ratio);  //2048
+        const int n_mlp   = (int)(width*mlp_ratio);  //2048
 
+        ctx_size += ggml_type_sizef(vtype); // logit_scale
         ctx_size += width*ggml_type_sizef(vtype); // visual.cls_token
         ctx_size += (patch_num*patch_num+1)*width*ggml_type_sizef(vtype); // visual.pos_embeddings
 
@@ -287,8 +322,8 @@ static bool eva_model_load(
         ctx_size += n_layers*(2*width*ggml_type_sizef(wtype)); // norm1
 
         ctx_size += n_layers*((width*width+width)*ggml_type_sizef(wtype)); // wq
-        ctx_size += n_layers*((width*width+width)*ggml_type_sizef(wtype)); // wk
-        ctx_size += n_layers*(width*width*ggml_type_sizef(wtype)); // wv
+        ctx_size += n_layers*(width*width*ggml_type_sizef(wtype)); // wk
+        ctx_size += n_layers*((width*width+width)*ggml_type_sizef(wtype)); // wv
 
         ctx_size += n_layers*(2*width*ggml_type_sizef(wtype)); // inner_attn_ln
 
@@ -306,9 +341,39 @@ static bool eva_model_load(
         ctx_size += 2*width*ggml_type_sizef(vtype); // final_norm
         ctx_size += (n_embd*width+n_embd)*ggml_type_sizef(vtype); // head
 
+        ctx_size += (11 + 23*n_layers)*256; // object overhead
+
 
         //text
-        //ctx_size += (5 + 10*n_layer)*256; // object overhead
+        const int context_length   = hparams.text_hparams.context_length;  //77
+        const int vocab_size   = hparams.text_hparams.vocab_size;  //49408
+        const int text_width   = hparams.text_hparams.width;  //512
+        const int n_head   = hparams.text_hparams.heads;  //8
+        const int n_layer   = hparams.text_hparams.layers;  //12
+
+        ctx_size += context_length*text_width*ggml_type_sizef(vtype); // positional_embedding
+        //text.text_projection with shape: torch.Size([512, 512])
+        ctx_size += (text_width*text_width)*ggml_type_sizef(vtype); // text_projection
+        //text.token_embedding.weight with shape: torch.Size([49408, 512])
+        ctx_size += (vocab_size*text_width)*ggml_type_sizef(vtype); // token_embedding
+
+        //Transformer
+        //text.transformer.resblocks.0.ln_1.weight with shape: torch.Size([512])
+        ctx_size += n_layer*(2*text_width*ggml_type_sizef(wtype)); // norm1
+        //text.transformer.resblocks.0.attn.in_proj_weight with shape: torch.Size([1536, 512])
+        ctx_size += n_layer*((3*text_width*text_width+3*text_width)*ggml_type_sizef(wtype)); // in_proj
+        //text.transformer.resblocks.0.attn.out_proj.weight with shape: torch.Size([512, 512]) 
+        ctx_size += n_layer*((text_width*text_width+text_width)*ggml_type_sizef(wtype)); // out_proj
+        //text.transformer.resblocks.0.ln_2.weight with shape: torch.Size([512])
+        ctx_size += n_layer*(2*text_width*ggml_type_sizef(wtype)); // norm2
+        //text.transformer.resblocks.0.mlp.c_fc.weight with shape: torch.Size([2048, 512])
+        ctx_size += n_layer*((n_mlp*text_width+n_mlp)*ggml_type_sizef(wtype)); // mlp.c_fc
+        //text.transformer.resblocks.0.mlp.c_proj.weight with shape: torch.Size([512, 2048])
+        ctx_size += n_layer*((text_width*n_mlp+text_width)*ggml_type_sizef(wtype)); // mlp.c_proj
+
+        //text.ln_final.weight with shape: torch.Size([512])
+        ctx_size += 2*text_width*ggml_type_sizef(vtype); // final_norm
+        ctx_size += (5 + 12*n_layer)*256; // object overhead
 
         fprintf(stderr, "%s: ggml ctx size = %6.2f MB\n", __func__, ctx_size/(1024.0*1024.0));
     }
@@ -332,6 +397,9 @@ static bool eva_model_load(
         const auto & hparams = model.hparams;
 
         const int n_embd  = hparams.n_embd;  //512
+        model.logit_scale = ggml_new_tensor_1d(ctx, vtype, 1);
+        model.tensors["logit_scale"] = model.logit_scale;
+
         //vision
         const int width   = hparams.vision_hparams.width;  //768
         const int image_size   = hparams.vision_hparams.image_size;  //224
@@ -433,6 +501,61 @@ static bool eva_model_load(
         model.tensors["visual.norm.bias"] = model.vision_model.norm_bias;
         model.tensors["visual.head.weight"] = model.vision_model.head_weight;
         model.tensors["visual.head.bias"] = model.vision_model.head_bias;
+
+
+        //text
+        const int context_length   = hparams.text_hparams.context_length;  //77
+        const int vocab_size   = hparams.text_hparams.vocab_size;  //49408
+        const int text_width   = hparams.text_hparams.width;  //512
+        const int n_head   = hparams.text_hparams.heads;  //8
+        const int n_layer   = hparams.text_hparams.layers;  //12
+
+        model.text_model.layers.resize(n_layer);
+
+        model.text_model.pos_embeddings = ggml_new_tensor_2d(ctx, wtype, context_length, text_width);
+        model.text_model.text_proj = ggml_new_tensor_2d(ctx, wtype, text_width, text_width);
+        model.text_model.token_embed = ggml_new_tensor_2d(ctx, wtype, vocab_size, text_width);
+
+        model.tensors["text.positional_embedding"] = model.text_model.pos_embeddings;
+        model.tensors["text.text_projection"] = model.text_model.text_proj;
+        model.tensors["text.token_embedding.weight"] = model.text_model.token_embed;
+
+        for (int i = 0; i < n_layer; ++i) {
+            auto & layer = model.text_model.layers[i];
+
+            layer.norm1_weight = ggml_new_tensor_1d(ctx, vtype, text_width);
+            layer.norm1_bias   = ggml_new_tensor_1d(ctx, vtype, text_width);
+            layer.in_proj_weight = ggml_new_tensor_2d(ctx, vtype, 3*text_width, text_width);
+            layer.in_proj_bias = ggml_new_tensor_1d(ctx, vtype, 3*text_width);
+            layer.out_proj_weight = ggml_new_tensor_2d(ctx, vtype, text_width, text_width);
+            layer.out_proj_bias = ggml_new_tensor_1d(ctx, vtype, text_width);
+            layer.norm2_weight = ggml_new_tensor_1d(ctx, vtype, text_width);
+            layer.norm2_bias   = ggml_new_tensor_1d(ctx, vtype, text_width);
+            layer.c_fc_weight = ggml_new_tensor_2d(ctx, vtype, 4*text_width, text_width);
+            layer.c_fc_bias = ggml_new_tensor_1d(ctx, vtype, 4*text_width);
+            layer.c_proj_weight = ggml_new_tensor_2d(ctx, vtype, text_width, 4*text_width);
+            layer.c_proj_bias = ggml_new_tensor_1d(ctx, vtype, text_width);
+
+            // map by name
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".ln_1.weight"] = layer.norm1_weight;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".ln_1.bias"] = layer.norm1_bias;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".attn.in_proj_weight"] = layer.in_proj_weight;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".attn.in_proj_bias"] = layer.in_proj_bias;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".attn.out_proj.weight"] = layer.out_proj_weight;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".attn.out_proj.bias"] = layer.out_proj_bias;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".ln_2.weight"] = layer.norm2_weight;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".ln_2.bias"] = layer.norm2_bias;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".mlp.c_fc.weight"] = layer.c_fc_weight;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".mlp.c_fc.bias"] = layer.c_fc_bias;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".mlp.c_proj.weight"] = layer.c_proj_weight;
+            model.tensors["text.transformer.resblocks." + std::to_string(i) + ".mlp.c_proj.bias"] = layer.c_proj_bias;
+        }
+
+        model.text_model.ln_final_weight = ggml_new_tensor_1d(ctx, vtype, text_width);
+        model.text_model.ln_final_bias   = ggml_new_tensor_1d(ctx, vtype, text_width);
+
+        model.tensors["text.ln_final.weight"] = model.text_model.ln_final_weight;
+        model.tensors["text.ln_final.bias"] = model.text_model.ln_final_bias;
     }
 
     const size_t file_offset = fin.tellg();

@@ -61,7 +61,8 @@ def process_and_write_variables(fout, model):
         # header
         sname = name.encode('utf-8')
         fout.write(struct.pack("ii", len(data.shape), len(sname)))
-        for dim in reversed(data.shape):
+        # for dim in reversed(data.shape):
+        for dim in data.shape:
             fout.write(struct.pack("i", dim))
         fout.write(sname)
 

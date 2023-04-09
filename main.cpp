@@ -32,7 +32,7 @@ int main(int argc, char ** argv) {
     ggml_time_init();
 
     gpt_params params;
-    params.model = "models/EVA02-CLIP-B-16/ggml-model-f16.bin";
+    params.model = "/home/zwr/EVA_env/eva-02.cpp/models/EVA02-CLIP-B-16/ggml-model-f16.bin";
 
     eva_context * ctx;
 
