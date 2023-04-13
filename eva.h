@@ -36,7 +36,15 @@ extern "C" {
     struct eva_context;
 
     EVA_API struct eva_context * eva_init_from_file(
-                             const char * path_model);
+                             const char * path_model, const char * image_path);
+
+    // Run the llama inference to obtain the logits and probabilities for the next token.
+    // tokens + n_tokens is the provided batch of new tokens to process
+    // n_past is the number of tokens to use from previous eval calls
+    // Returns 0 on success
+    EVA_API int eva_eval(
+            struct eva_context * ctx,
+                        int   n_threads);
 
 #ifdef __cplusplus
 }

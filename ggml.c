@@ -10882,3 +10882,7 @@ int ggml_cpu_has_vsx(void) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+void ggml_vector_dot_f16(const int n, float * s, uint16_t * a, uint16_t * b){
+    ggml_vec_dot_f16(n, s, a, b);
+}

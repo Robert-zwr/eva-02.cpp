@@ -33,17 +33,31 @@ int main(int argc, char ** argv) {
 
     gpt_params params;
     params.model = "/home/zwr/EVA_env/eva-02.cpp/models/EVA02-CLIP-B-16/ggml-model-f16.bin";
+    params.img = "/home/zwr/EVA_env/eva-02.cpp/temp/image.bin";
 
     eva_context * ctx;
 
     // load the model
     {
-        ctx = eva_init_from_file(params.model.c_str());
+        ctx = eva_init_from_file(params.model.c_str(), params.img.c_str());
 
         if (ctx == NULL) {
             fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
             return 1;
         }
+    }
+
+    // print system information
+    {
+        fprintf(stderr, "\n");
+        fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
+                params.n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
+    }
+
+    // inference
+    if (eva_eval(ctx, params.n_threads)) {
+        fprintf(stderr, "%s : failed to eval\n", __func__);
+        return 1;
     }
 
     fprintf(stderr, "done\n");

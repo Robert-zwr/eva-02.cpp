@@ -620,6 +620,8 @@ struct ggml_tensor * ggml_flash_ff(
         struct ggml_tensor  * c0,
         struct ggml_tensor  * c1);
 
+void ggml_vector_dot_f16(const int n, float * s, uint16_t * a, uint16_t * b);
+
 //
 // automatic differentiation
 //

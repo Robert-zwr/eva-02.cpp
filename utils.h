@@ -30,6 +30,7 @@ struct gpt_params {
     int32_t n_batch = 8; // batch size for prompt processing
 
     std::string model  = "models/lamma-7B/ggml-model.bin"; // model path
+    std::string img    = ""; // image path
     std::string prompt = "";
 
     std::vector<std::string> antiprompt; // string upon seeing which more user input is prompted
