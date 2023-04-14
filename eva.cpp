@@ -768,26 +768,26 @@ static bool eva_eval_internal(
     ggml_cgraph gf = {};
     gf.n_threads = n_threads;
 
-    std::string template_path = "/home/zwr/EVA_env/eva-02.cpp/temp/template.bin";
-    std::vector<char> f_buf(1024*1024);
-    auto fin = std::ifstream(template_path, std::ios::binary);
-    fin.rdbuf()->pubsetbuf(f_buf.data(), f_buf.size());
-    if (!fin) {
-        fprintf(stderr, "%s: failed to open '%s'\n", __func__, template_path.c_str());
-        return false;
-    }
-    struct ggml_context * ctx1 = ggml_init(params);
-    struct ggml_tensor * a = ggml_new_tensor_3d(ctx1, GGML_TYPE_F16, 1, 3, 4);
-    fin.read(reinterpret_cast<char *>(a->data), ggml_nbytes(a));
-    struct ggml_tensor * b = ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, 4, 3);
-    fin.read(reinterpret_cast<char *>(b->data), ggml_nbytes(b));
-    fin.close();
+    //std::string template_path = "/home/zwr/EVA_env/eva-02.cpp/temp/template.bin";
+    //std::vector<char> f_buf(1024*1024);
+    //auto fin = std::ifstream(template_path, std::ios::binary);
+    //fin.rdbuf()->pubsetbuf(f_buf.data(), f_buf.size());
+    //if (!fin) {
+    //    fprintf(stderr, "%s: failed to open '%s'\n", __func__, template_path.c_str());
+    //    return false;
+    //}
+    //struct ggml_context * ctx1 = ggml_init(params);
+    //struct ggml_tensor * a = ggml_new_tensor_3d(ctx1, GGML_TYPE_F16, 1, 3, 4);
+    //fin.read(reinterpret_cast<char *>(a->data), ggml_nbytes(a));
+    //struct ggml_tensor * b = ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, 4, 3);
+    //fin.read(reinterpret_cast<char *>(b->data), ggml_nbytes(b));
+    //fin.close();
 
-    struct ggml_tensor * c = ggml_conv_1d_1s(ctx1, a, b);
-    ggml_build_forward_expand(&gf, c);
-    ggml_graph_compute       (ctx1, &gf);
+    //struct ggml_tensor * c = ggml_conv_1d_1s(ctx1, a, b);
+    //ggml_build_forward_expand(&gf, c);
+    //ggml_graph_compute       (ctx1, &gf);
 
-    ggml_free(ctx1);
+    //ggml_free(ctx1);
 
     struct ggml_context * ctx0 = ggml_init(params);
     struct ggml_tensor * vision_proj = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num);
@@ -810,6 +810,53 @@ static bool eva_eval_internal(
             v += bias;
             memcpy((float*)(vision_proj->data)+j*vision_width+i, &v, sizeof(float));
         }
+    }
+    //x = torch.cat((cls_tokens, x), dim=1)
+    struct ggml_tensor * vision_proj_with_cls_token = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num+1);
+    //memcpy(vision_proj_cls->data, model.vision_model.cls_token->data, vision_width*sizeof(float));
+    for (int i = 0; i < vision_width; i++){
+        *((float*)(vision_proj_with_cls_token->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.cls_token->data)+i));
+    }
+    memcpy((float*)(vision_proj_with_cls_token->data)+vision_width, vision_proj->data, vision_width*patch_num*patch_num*sizeof(float));
+    //x = x + position_embeddings
+    struct ggml_tensor * vision_pos_embeddings = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num+1);
+    for (int i = 0; i < vision_width; i++){
+        for (int j = 0; j < patch_num*patch_num+1; j++){
+            *((float*)(vision_pos_embeddings->data)+j*vision_width+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.pos_embeddings->data)+j*vision_width+i));
+        }
+    }
+    struct ggml_tensor * inpL = ggml_add(ctx0, vision_proj_with_cls_token, vision_pos_embeddings);
+
+    //transformer layers
+    for (int il = 0; il < n_vision_layer; ++il) {
+        struct ggml_tensor * inpSA = inpL;
+
+        struct ggml_tensor * cur;
+        //norm1
+        cur = ggml_norm(ctx0, inpL);
+
+        struct ggml_tensor * weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_weight->data)+i));
+        }
+        struct ggml_tensor * weight_broadcast = ggml_repeat(ctx0, weight, cur);
+        cur = ggml_mul(ctx0, cur, weight_broadcast);
+
+        struct ggml_tensor * bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_bias->data)+i));
+        }
+        struct ggml_tensor * bias_broadcast = ggml_repeat(ctx0, bias, cur);
+        cur = ggml_add(ctx0, cur, bias_broadcast);
+        ggml_build_forward_expand(&gf, cur);
+        ggml_graph_compute       (ctx0, &gf);
+        ggml_free(ctx0);
+        //struct ggml_tensor * weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+        //for (int i = 0; i < vision_width; i++){
+        //    struct ggml_tensor * cur_row = ggml_get_rows(ctx0, cur, );
+        //    *(float*)(weight->data) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_weight->data)+i));
+        //    cur = ggml_scale(ctx0, cur, weight);
+        //}
     }
     //half_to_float(*(unsigned short*)model.vision_model.cls_token->data)==0.12561
     //half_to_float(*(((unsigned short*)model.vision_model.cls_token->data)+1))==-0.595214844
