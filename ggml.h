@@ -222,6 +222,7 @@ enum ggml_op {
     GGML_OP_SUM,
     GGML_OP_MEAN,
     GGML_OP_REPEAT,
+    GGML_OP_REPEAT_3D,
     GGML_OP_ABS,
     GGML_OP_SGN,
     GGML_OP_NEG,
@@ -249,6 +250,12 @@ enum ggml_op {
 
     GGML_OP_FLASH_ATTN,
     GGML_OP_FLASH_FF,
+
+    GGML_OP_SPLIT_GET_FIRST,
+    GGML_OP_SPLIT_GET_SECOND,
+    GGML_OP_CAT,
+
+    GGML_OP_ROTATE_HALF,
 
     GGML_OP_COUNT,
 };
@@ -448,6 +455,11 @@ struct ggml_tensor * ggml_repeat(
         struct ggml_tensor  * a,
         struct ggml_tensor  * b);
 
+struct ggml_tensor * ggml_repeat_3D(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b);
+
 struct ggml_tensor * ggml_abs(
         struct ggml_context * ctx,
         struct ggml_tensor  * a);
@@ -619,6 +631,27 @@ struct ggml_tensor * ggml_flash_ff(
         struct ggml_tensor  * b1,
         struct ggml_tensor  * c0,
         struct ggml_tensor  * c1);
+
+struct ggml_tensor * ggml_split_get_first(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   axis,
+        int                   n);
+
+struct ggml_tensor * ggml_split_get_second(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   axis,
+        int                   n);
+
+struct ggml_tensor * ggml_cat(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b);
+
+struct ggml_tensor * ggml_rotate_half(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a);
 
 void ggml_vector_dot_f16(const int n, float * s, uint16_t * a, uint16_t * b);
 

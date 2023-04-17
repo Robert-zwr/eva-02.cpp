@@ -698,23 +698,6 @@ static bool eva_model_load(
     return true;
 }
 
-typedef unsigned short ushort;//占用2个字节
-typedef unsigned int uint;    //占用4个字节
- 
-uint as_uint(const float x) {
-    return *(uint*)&x;
-}
-float as_float(const uint x) {
-    return *(float*)&x;
-}
- 
-float half_to_float(const ushort x) { // IEEE-754 16-bit floating-point format (without infinity): 1-5-10, exp-15, +-131008.0, +-6.1035156E-5, +-5.9604645E-8, 3.311 digits
-    const uint e = (x&0x7C00)>>10; // exponent
-    const uint m = (x&0x03FF)<<13; // mantissa
-    const uint v = as_uint((float)m)>>23; // evil log2 bit hack to count leading zeros in denormalized format
-    return as_float((x&0x8000)<<16 | (e!=0)*((e+112)<<23|m) | ((e==0)&(m!=0))*((v-37)<<23|((m<<(150-v))&0x007FE000))); // sign : normalized : denormalized
-}
-
 // evaluate the transformer
 //
 //   - lctx:      llama context
@@ -738,9 +721,10 @@ static bool eva_eval_internal(
     const int image_size = vision_hparams.image_size;
     const int n_vision_layer = vision_hparams.layers;
     const int vision_width = vision_hparams.width;  //768
-    const int head_width = vision_hparams.head_width;
+    const int head_width = vision_hparams.head_width; //64
     const int patch_size = vision_hparams.patch_size; //16
     const int patch_num   = image_size/patch_size;  //14
+    const int n_head = vision_width/head_width; //12
 
     const int context_length = text_hparams.context_length;
     const int vocab_size = text_hparams.vocab_size;
@@ -848,7 +832,74 @@ static bool eva_eval_internal(
         }
         struct ggml_tensor * bias_broadcast = ggml_repeat(ctx0, bias, cur);
         cur = ggml_add(ctx0, cur, bias_broadcast);
-        ggml_build_forward_expand(&gf, cur);
+
+        //self-attention
+        struct ggml_tensor * bq = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        struct ggml_tensor * bv = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(bq->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].bq->data)+i));
+            *((float*)(bv->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].bv->data)+i));
+        }
+        struct ggml_tensor * bq_broadcast = ggml_repeat(ctx0, bq, cur);
+        struct ggml_tensor * bv_broadcast = ggml_repeat(ctx0, bv, cur);
+
+        struct ggml_tensor * Qcur = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.layers[il].wq, cur), bq_broadcast);
+        struct ggml_tensor * Kcur = ggml_mul_mat(ctx0, model.vision_model.layers[il].wk, cur);
+        struct ggml_tensor * Vcur = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.layers[il].wv, cur), ggml_repeat(ctx0, model.vision_model.layers[il].bv, cur));
+
+        // Q = Qcur.contiguous().view(N, n_head = n_head, head_width).permute(0, 2, 1, 3).continueous()
+        struct ggml_tensor * Q =
+            ggml_cpy(ctx0,
+                ggml_permute(ctx0,
+                    ggml_cpy(ctx0,
+                            Qcur,
+                            ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_width, n_head, patch_num*patch_num+1)),
+                0, 2, 1, 3),
+            ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_width, patch_num*patch_num+1, n_head));  //# B, num_heads=12, N=197, C=64
+        // K = Kcur.contiguous().view(N, n_head = n_head, head_width).permute(0, 2, 1, 3).continueous()
+        struct ggml_tensor * K =
+            ggml_cpy(ctx0,
+                ggml_permute(ctx0,
+                    ggml_cpy(ctx0,
+                            Kcur,
+                            ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_width, n_head, patch_num*patch_num+1)),
+                0, 2, 1, 3),
+            ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_width, patch_num*patch_num+1, n_head));
+        // V = Vcur.contiguous().view(N, n_head = n_head, head_width).permute(0, 2, 1, 3).continueous()
+        struct ggml_tensor * V =
+            ggml_cpy(ctx0,
+                ggml_permute(ctx0,
+                    ggml_cpy(ctx0,
+                            Vcur,
+                            ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_width, n_head, patch_num*patch_num+1)),
+                0, 2, 1, 3),
+            ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, head_width, patch_num*patch_num+1, n_head));
+
+        struct ggml_tensor * Q_cls_token = ggml_split_get_first(ctx0, Q, 1, 1);
+        struct ggml_tensor * Q_without_cls_token = ggml_split_get_second(ctx0, Q, 1, 1);
+        struct ggml_tensor * K_cls_token = ggml_split_get_first(ctx0, K, 1, 1);
+        struct ggml_tensor * K_without_cls_token = ggml_split_get_second(ctx0, K, 1, 1);
+        
+        //2D RoPE
+        struct ggml_tensor * freqs_cos = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, head_width, patch_num*patch_num);
+        struct ggml_tensor * freqs_sin = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, head_width, patch_num*patch_num);
+        for (int i = 0; i < patch_num*patch_num; i++){
+            for (int j = 0; j < head_width; j++){
+                *((float*)(freqs_cos->data)+i*head_width+j) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.rope_cos->data)+i*head_width+j));
+                *((float*)(freqs_sin->data)+i*head_width+j) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.rope_sin->data)+i*head_width+j));
+            }
+        }
+        struct ggml_tensor * Q_without_cls_token_rot = ggml_rotate_half(ctx0, Q_without_cls_token);
+        struct ggml_tensor * Q_rope_cos = ggml_mul(ctx0, Q_without_cls_token, ggml_repeat_3D(ctx0, freqs_cos, Q_without_cls_token));
+        struct ggml_tensor * Q_rope_sin = ggml_mul(ctx0, Q_without_cls_token_rot, ggml_repeat_3D(ctx0, freqs_sin, Q_without_cls_token));
+        struct ggml_tensor * Q_rope = ggml_cat(ctx0, Q_cls_token, ggml_add(ctx0, Q_rope_cos, Q_rope_sin));
+        struct ggml_tensor * K_without_cls_token_rot = ggml_rotate_half(ctx0, K_without_cls_token);
+        struct ggml_tensor * K_rope_cos = ggml_mul(ctx0, K_without_cls_token, ggml_repeat_3D(ctx0, freqs_cos, K_without_cls_token));
+        struct ggml_tensor * K_rope_sin = ggml_mul(ctx0, K_without_cls_token_rot, ggml_repeat_3D(ctx0, freqs_sin, K_without_cls_token));
+        struct ggml_tensor * K_rope = ggml_cat(ctx0, K_cls_token, ggml_add(ctx0, K_rope_cos, K_rope_sin));
+              
+        
+        ggml_build_forward_expand(&gf, K_rope);
         ggml_graph_compute       (ctx0, &gf);
         ggml_free(ctx0);
         //struct ggml_tensor * weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
