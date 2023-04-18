@@ -5758,7 +5758,7 @@ static void ggml_compute_forward_norm_f32(
     const size_t nb2 = dst->nb[2];
     const size_t nb3 = dst->nb[3];
 
-    const ggml_float eps = 1e-5f; // TODO: make this a parameter
+    const ggml_float eps = 1e-6f; // TODO: make this a parameter
 
     // TODO: optimize
     for (int i03 = 0; i03 < ne03; i03++) {

@@ -717,14 +717,18 @@ static bool eva_eval_internal(
     const auto & vision_hparams = hparams.vision_hparams;
     const auto & text_hparams = hparams.text_hparams;
 
-    const int n_embd  = hparams.n_embd;
+    const int n_embd  = hparams.n_embd; //512
+
     const int image_size = vision_hparams.image_size;
     const int n_vision_layer = vision_hparams.layers;
     const int vision_width = vision_hparams.width;  //768
     const int head_width = vision_hparams.head_width; //64
     const int patch_size = vision_hparams.patch_size; //16
+    const float ratio = vision_hparams.mlp_ratio; //2.6667
+
     const int patch_num   = image_size/patch_size;  //14
     const int n_head = vision_width/head_width; //12
+    const int ratio_width = vision_width*ratio; //2048
 
     const int context_length = text_hparams.context_length;
     const int vocab_size = text_hparams.vocab_size;
@@ -741,7 +745,7 @@ static bool eva_eval_internal(
     auto & mem_per_token = lctx.mem_per_token;
 
     // TODO: fix this hardcoded size
-    static size_t buf_size = 512u*1024*1024;
+    static size_t buf_size = 512u*1024*1024*2;
     static void * buf = malloc(buf_size);
 
     struct ggml_init_params params = {
@@ -751,27 +755,6 @@ static bool eva_eval_internal(
 
     ggml_cgraph gf = {};
     gf.n_threads = n_threads;
-
-    //std::string template_path = "/home/zwr/EVA_env/eva-02.cpp/temp/template.bin";
-    //std::vector<char> f_buf(1024*1024);
-    //auto fin = std::ifstream(template_path, std::ios::binary);
-    //fin.rdbuf()->pubsetbuf(f_buf.data(), f_buf.size());
-    //if (!fin) {
-    //    fprintf(stderr, "%s: failed to open '%s'\n", __func__, template_path.c_str());
-    //    return false;
-    //}
-    //struct ggml_context * ctx1 = ggml_init(params);
-    //struct ggml_tensor * a = ggml_new_tensor_3d(ctx1, GGML_TYPE_F16, 1, 3, 4);
-    //fin.read(reinterpret_cast<char *>(a->data), ggml_nbytes(a));
-    //struct ggml_tensor * b = ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, 4, 3);
-    //fin.read(reinterpret_cast<char *>(b->data), ggml_nbytes(b));
-    //fin.close();
-
-    //struct ggml_tensor * c = ggml_conv_1d_1s(ctx1, a, b);
-    //ggml_build_forward_expand(&gf, c);
-    //ggml_graph_compute       (ctx1, &gf);
-
-    //ggml_free(ctx1);
 
     struct ggml_context * ctx0 = ggml_init(params);
     struct ggml_tensor * vision_proj = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num);
@@ -813,27 +796,28 @@ static bool eva_eval_internal(
 
     //transformer layers
     for (int il = 0; il < n_vision_layer; ++il) {
+        
         struct ggml_tensor * inpSA = inpL;
 
         struct ggml_tensor * cur;
         //norm1
         cur = ggml_norm(ctx0, inpL);
 
-        struct ggml_tensor * weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        struct ggml_tensor * norm1_weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
         for (int i = 0; i < vision_width; i++){
-            *((float*)(weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_weight->data)+i));
+            *((float*)(norm1_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_weight->data)+i));
         }
-        struct ggml_tensor * weight_broadcast = ggml_repeat(ctx0, weight, cur);
-        cur = ggml_mul(ctx0, cur, weight_broadcast);
+        struct ggml_tensor * norm1_weight_broadcast = ggml_repeat(ctx0, norm1_weight, cur);
+        cur = ggml_mul(ctx0, cur, norm1_weight_broadcast);
 
-        struct ggml_tensor * bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        struct ggml_tensor * norm1_bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
         for (int i = 0; i < vision_width; i++){
-            *((float*)(bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_bias->data)+i));
+            *((float*)(norm1_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_bias->data)+i));
         }
-        struct ggml_tensor * bias_broadcast = ggml_repeat(ctx0, bias, cur);
-        cur = ggml_add(ctx0, cur, bias_broadcast);
+        struct ggml_tensor * norm1_bias_broadcast = ggml_repeat(ctx0, norm1_bias, cur);
+        cur = ggml_add(ctx0, cur, norm1_bias_broadcast);
 
-        //self-attention
+        //prepare q,k,v for self-attention
         struct ggml_tensor * bq = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
         struct ggml_tensor * bv = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
         for (int i = 0; i < vision_width; i++){
@@ -845,7 +829,7 @@ static bool eva_eval_internal(
 
         struct ggml_tensor * Qcur = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.layers[il].wq, cur), bq_broadcast);
         struct ggml_tensor * Kcur = ggml_mul_mat(ctx0, model.vision_model.layers[il].wk, cur);
-        struct ggml_tensor * Vcur = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.layers[il].wv, cur), ggml_repeat(ctx0, model.vision_model.layers[il].bv, cur));
+        struct ggml_tensor * Vcur = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.layers[il].wv, cur), bv_broadcast);
 
         // Q = Qcur.contiguous().view(N, n_head = n_head, head_width).permute(0, 2, 1, 3).continueous()
         struct ggml_tensor * Q =
@@ -897,18 +881,151 @@ static bool eva_eval_internal(
         struct ggml_tensor * K_rope_cos = ggml_mul(ctx0, K_without_cls_token, ggml_repeat_3D(ctx0, freqs_cos, K_without_cls_token));
         struct ggml_tensor * K_rope_sin = ggml_mul(ctx0, K_without_cls_token_rot, ggml_repeat_3D(ctx0, freqs_sin, K_without_cls_token));
         struct ggml_tensor * K_rope = ggml_cat(ctx0, K_cls_token, ggml_add(ctx0, K_rope_cos, K_rope_sin));
-              
+
+        //attention
+        struct ggml_tensor * scale = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+        //*((float*)(scale->data)) = ggml_fp16_to_fp32(*((uint16_t*)(model.logit_scale->data)));
+        *((float*)(scale->data)) = 0.125;
+        Q = ggml_scale(ctx0, Q_rope, scale);
+        // query @ key.transpose(-2, -1)
+        struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K_rope, Q);
+        // KQ = KQ.softmax(-1)
+        struct ggml_tensor * KQ_soft_max = ggml_soft_max(ctx0, KQ); //inplace
+        // KQV = attn @ value
+        struct ggml_tensor * V_trans = ggml_cpy(ctx0, ggml_transpose(ctx0, V), ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, patch_num*patch_num+1, head_width, n_head));
+        struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V_trans, KQ_soft_max);
+        // KQV_merged = KQV.permute(0, 2, 1, 3)
+        struct ggml_tensor * KQV_merged = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
+        // cur = KQV_merged.contiguous().view(n_embd, N)
+        cur = ggml_cpy(ctx0,
+                KQV_merged,
+                ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num+1));
+
+        //inner_attn_ln
+        cur = ggml_norm(ctx0, cur);
+
+        struct ggml_tensor * inner_attn_norm_weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(inner_attn_norm_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].inner_attn_norm_weight->data)+i));
+        }
+        struct ggml_tensor * inner_attn_norm_weight_broadcast = ggml_repeat(ctx0, inner_attn_norm_weight, cur);
+        cur = ggml_mul(ctx0, cur, inner_attn_norm_weight_broadcast);
+
+        struct ggml_tensor * inner_attn_norm_bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(inner_attn_norm_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].inner_attn_norm_bias->data)+i));
+        }
+        struct ggml_tensor * inner_attn_norm_bias_broadcast = ggml_repeat(ctx0, inner_attn_norm_bias, cur);
+        cur = ggml_add(ctx0, cur, inner_attn_norm_bias_broadcast);
+
+        //projection
+        struct ggml_tensor * bo = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(bo->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].bo->data)+i));
+        }
+        struct ggml_tensor * bo_broadcast = ggml_repeat(ctx0, bo, cur);
+        cur = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.layers[il].wo, cur), bo_broadcast);
         
-        ggml_build_forward_expand(&gf, K_rope);
-        ggml_graph_compute       (ctx0, &gf);
-        ggml_free(ctx0);
-        //struct ggml_tensor * weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
-        //for (int i = 0; i < vision_width; i++){
-        //    struct ggml_tensor * cur_row = ggml_get_rows(ctx0, cur, );
-        //    *(float*)(weight->data) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm1_weight->data)+i));
-        //    cur = ggml_scale(ctx0, cur, weight);
-        //}
+
+        struct ggml_tensor * inpFF = ggml_add(ctx0, cur, inpSA);
+
+
+        // feed-forward network
+        
+        //norm2
+        cur = ggml_norm(ctx0, inpFF);
+
+        struct ggml_tensor * norm2_weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(norm2_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm2_weight->data)+i));
+        }
+        struct ggml_tensor * norm2_weight_broadcast = ggml_repeat(ctx0, norm2_weight, cur);
+        cur = ggml_mul(ctx0, cur, norm2_weight_broadcast);
+
+        struct ggml_tensor * norm2_bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(norm2_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].norm2_bias->data)+i));
+        }
+        struct ggml_tensor * norm2_bias_broadcast = ggml_repeat(ctx0, norm2_bias, cur);
+        cur = ggml_add(ctx0, cur, norm2_bias_broadcast);
+
+        //swiglu ffn
+        struct ggml_tensor * b1 = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, ratio_width);
+        struct ggml_tensor * b2 = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, ratio_width);
+        struct ggml_tensor * b3 = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+        for (int i = 0; i < ratio_width; i++){
+            *((float*)(b1->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].b1->data)+i));
+            *((float*)(b2->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].b2->data)+i));
+        }
+        for (int i = 0; i < vision_width; i++){
+            *((float*)(b3->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].b3->data)+i));
+        }
+        struct ggml_tensor * broadcast_template = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, ratio_width, patch_num*patch_num+1);
+        struct ggml_tensor * b1_broadcast = ggml_repeat(ctx0, b1, broadcast_template);
+        struct ggml_tensor * b2_broadcast = ggml_repeat(ctx0, b2, broadcast_template);
+        struct ggml_tensor * b3_broadcast = ggml_repeat(ctx0, b3, cur);
+
+        struct ggml_tensor * x1 = ggml_add(ctx0, ggml_mul_mat(ctx0,model.vision_model.layers[il].w1,cur), b1_broadcast);
+        struct ggml_tensor * x2 = ggml_add(ctx0, ggml_mul_mat(ctx0,model.vision_model.layers[il].w2,cur), b2_broadcast);
+        // SILU activation
+        struct ggml_tensor * x1_silu = ggml_silu(ctx0, x1);
+        cur = ggml_mul(ctx0, x1_silu, x2);
+
+        //ffn_ln
+        cur = ggml_norm(ctx0, cur);
+
+        struct ggml_tensor * ffn_norm_weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, ratio_width);
+        for (int i = 0; i < ratio_width; i++){
+            *((float*)(ffn_norm_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].ffn_norm_weight->data)+i));
+        }
+        struct ggml_tensor * ffn_norm_weight_broadcast = ggml_repeat(ctx0, ffn_norm_weight, cur);
+        cur = ggml_mul(ctx0, cur, ffn_norm_weight_broadcast);
+
+        struct ggml_tensor * ffn_norm_bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, ratio_width);
+        for (int i = 0; i < ratio_width; i++){
+            *((float*)(ffn_norm_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.layers[il].ffn_norm_bias->data)+i));
+        }
+        struct ggml_tensor * ffn_norm_bias_broadcast = ggml_repeat(ctx0, ffn_norm_bias, cur);
+        cur = ggml_add(ctx0, cur, ffn_norm_bias_broadcast);
+
+        cur = ggml_add(ctx0, ggml_mul_mat(ctx0,model.vision_model.layers[il].w3,cur), b3_broadcast);
+        
+
+        cur  = ggml_add(ctx0, cur, inpFF);
+
+        // input for next layer
+        inpL = cur;
     }
+    //norm
+    inpL = ggml_norm(ctx0, inpL);
+
+    struct ggml_tensor * norm_weight = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+    for (int i = 0; i < vision_width; i++){
+        *((float*)(norm_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.norm_weight->data)+i));
+    }
+    struct ggml_tensor * norm_weight_broadcast = ggml_repeat(ctx0, norm_weight, inpL);
+    inpL = ggml_mul(ctx0, inpL, norm_weight_broadcast);
+
+    struct ggml_tensor * norm_bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+    for (int i = 0; i < vision_width; i++){
+        *((float*)(norm_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.norm_bias->data)+i));
+    }
+    struct ggml_tensor * norm_bias_broadcast = ggml_repeat(ctx0, norm_bias, inpL);
+    inpL = ggml_add(ctx0, inpL, norm_bias_broadcast);
+
+    struct ggml_tensor * zero = ggml_new_i32(ctx0, 0);
+    inpL = ggml_get_rows(ctx0, inpL, zero);
+
+    //head
+    struct ggml_tensor * bh = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd);
+    for (int i = 0; i < n_embd; i++){
+        *((float*)(bh->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.head_bias->data)+i));
+    }
+    inpL = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.head_weight, inpL), bh);
+
+    ggml_build_forward_expand(&gf, inpL);
+    ggml_graph_compute       (ctx0, &gf);
+    ggml_free(ctx0);
     //half_to_float(*(unsigned short*)model.vision_model.cls_token->data)==0.12561
     //half_to_float(*(((unsigned short*)model.vision_model.cls_token->data)+1))==-0.595214844
     //*((float*)(lctx.image->data)+17070)==0.324509382([0, 76, 46])
