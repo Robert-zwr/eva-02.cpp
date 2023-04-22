@@ -222,7 +222,7 @@ enum ggml_op {
     GGML_OP_SUM,
     GGML_OP_MEAN,
     GGML_OP_REPEAT,
-    GGML_OP_REPEAT_3D,
+    GGML_OP_REPEAT_3D, ////
     GGML_OP_ABS,
     GGML_OP_SGN,
     GGML_OP_NEG,
@@ -230,8 +230,9 @@ enum ggml_op {
     GGML_OP_RELU,
     GGML_OP_GELU,
     GGML_OP_SILU,
-    GGML_OP_NORM, // normalize
+    GGML_OP_NORM,
     GGML_OP_RMS_NORM,
+    GGML_OP_L2NORM, ////
 
     GGML_OP_MUL_MAT,
 
@@ -251,11 +252,11 @@ enum ggml_op {
     GGML_OP_FLASH_ATTN,
     GGML_OP_FLASH_FF,
 
-    GGML_OP_SPLIT_GET_FIRST,
-    GGML_OP_SPLIT_GET_SECOND,
-    GGML_OP_CAT,
+    GGML_OP_SPLIT_GET_FIRST, ////
+    GGML_OP_SPLIT_GET_SECOND, ////
+    GGML_OP_CAT, ////
 
-    GGML_OP_ROTATE_HALF,
+    GGML_OP_ROTATE_HALF, ////
 
     GGML_OP_COUNT,
 };
@@ -496,6 +497,10 @@ struct ggml_tensor * ggml_norm(
         struct ggml_tensor  * a);
 
 struct ggml_tensor * ggml_rms_norm(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a);
+
+struct ggml_tensor * ggml_l2norm(
         struct ggml_context * ctx,
         struct ggml_tensor  * a);
 

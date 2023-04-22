@@ -2253,6 +2253,7 @@ static const char * GGML_OP_LABEL[GGML_OP_COUNT] = {
     "SILU",
     "NORM",
     "RMS_NORM",
+    "L2_NORM",
 
     "MUL_MAT",
 
@@ -2279,7 +2280,7 @@ static const char * GGML_OP_LABEL[GGML_OP_COUNT] = {
     "GGML_ROTATE_HALF",
 };
 
-static_assert(GGML_OP_COUNT == 40, "GGML_OP_COUNT != 40");
+static_assert(GGML_OP_COUNT == 41, "GGML_OP_COUNT != 41");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -2304,6 +2305,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "silu(x)",
     "norm(x)",
     "rms_norm(x)",
+    "l2_norm(x)",
 
     "X*Y",
 
@@ -2330,7 +2332,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rotate_half(x)",
 };
 
-static_assert(GGML_OP_COUNT == 40, "GGML_OP_COUNT != 40");
+static_assert(GGML_OP_COUNT == 41, "GGML_OP_COUNT != 41");
 
 //
 // ggml object
@@ -3867,6 +3869,20 @@ struct ggml_tensor * ggml_rms_norm_inplace(
         struct ggml_context * ctx,
         struct ggml_tensor  * a) {
     return ggml_rms_norm_impl(ctx, a, true);
+}
+
+struct ggml_tensor * ggml_l2norm(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a) {
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+
+    result->op   = GGML_OP_L2NORM;
+    result->grad = NULL;
+    result->src0 = a;
+    result->src1 = NULL; 
+
+    return result;
 }
 
 // ggml_mul_mat
@@ -5878,6 +5894,81 @@ static void ggml_compute_forward_rms_norm(
         case GGML_TYPE_F32:
             {
                 ggml_compute_forward_rms_norm_f32(params, src0, dst);
+            } break;
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_I8:
+        case GGML_TYPE_I16:
+        case GGML_TYPE_I32:
+        case GGML_TYPE_F16:
+        case GGML_TYPE_COUNT:
+            {
+                GGML_ASSERT(false);
+            } break;
+    }
+}
+
+static void ggml_compute_forward_l2_norm_f32(
+        const struct ggml_compute_params * params,
+        const struct ggml_tensor * src0,
+        struct ggml_tensor * dst) {
+    GGML_ASSERT(ggml_are_same_shape(src0, dst));
+
+    if (params->type == GGML_TASK_INIT || params->type == GGML_TASK_FINALIZE) {
+        return;
+    }
+
+    GGML_ASSERT(src0->nb[0] == sizeof(float));
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int ne00 = src0->ne[0];
+    const int ne01 = src0->ne[1];
+    const int ne02 = src0->ne[2];
+    const int ne03 = src0->ne[3];
+
+    const size_t nb01 = src0->nb[1];
+    const size_t nb02 = src0->nb[2];
+    const size_t nb03 = src0->nb[3];
+
+    const size_t nb1 = dst->nb[1];
+    const size_t nb2 = dst->nb[2];
+    const size_t nb3 = dst->nb[3];
+
+    const ggml_float eps = 1e-6f; // TODO: make this a parameter
+
+    // TODO: optimize
+    for (int i03 = 0; i03 < ne03; i03++) {
+        for (int i02 = 0; i02 < ne02; i02++) {
+            for (int i01 = ith; i01 < ne01; i01 += nth) {
+                const float * x = (float *) ((char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03);
+
+                ggml_float square_sum = 0.0;
+                for (int i00 = 0; i00 < ne00; i00++) {
+                    square_sum += x[i00] * x[i00];
+                }
+
+                float * y = (float *) ((char *) dst->data + i01*nb1 + i02*nb2 + i03*nb3);
+
+                memcpy(y, x, ne00 * sizeof(float));
+
+                const float scale = 1.0/sqrt(square_sum + eps);
+
+                ggml_vec_scale_f32(ne00, y, scale);
+            }
+        }
+    }
+}
+
+static void ggml_compute_forward_l2_norm(
+        const struct ggml_compute_params * params,
+        const struct ggml_tensor * src0,
+        struct ggml_tensor * dst) {
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_l2_norm_f32(params, src0, dst);
             } break;
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
@@ -9337,6 +9428,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_rms_norm(params, tensor->src0, tensor);
             } break;
+        case GGML_OP_L2NORM:
+            {
+                ggml_compute_forward_l2_norm(params, tensor->src0, tensor);
+            } break;
         case GGML_OP_MUL_MAT:
             {
                 ggml_compute_forward_mul_mat(params, tensor->src0, tensor->src1, tensor);
@@ -9600,6 +9695,10 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
                 GGML_ASSERT(false); // TODO: not implemented
             } break;
         case GGML_OP_RMS_NORM:
+            {
+                GGML_ASSERT(false); // TODO: not implemented
+            } break;
+        case GGML_OP_L2NORM:
             {
                 GGML_ASSERT(false); // TODO: not implemented
             } break;
@@ -10024,6 +10123,7 @@ void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph) 
                 case GGML_OP_SUM:
                 case GGML_OP_MEAN:
                 case GGML_OP_REPEAT:
+                case GGML_OP_REPEAT_3D:
                 case GGML_OP_ABS:
                 case GGML_OP_SGN:
                 case GGML_OP_NEG:
@@ -10042,6 +10142,7 @@ void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph) 
                     } break;
                 case GGML_OP_NORM:
                 case GGML_OP_RMS_NORM:
+                case GGML_OP_L2NORM:
                     {
                         node->n_tasks = n_threads;
                     } break;
@@ -10203,6 +10304,10 @@ void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph) 
 
                         work_size = MAX(work_size, cur);
                     } break;
+                case GGML_OP_SPLIT_GET_FIRST:
+                case GGML_OP_SPLIT_GET_SECOND:
+                case GGML_OP_CAT:
+                case GGML_OP_ROTATE_HALF:
                 case GGML_OP_NONE:
                     {
                         node->n_tasks = 1;

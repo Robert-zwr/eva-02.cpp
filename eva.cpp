@@ -182,12 +182,12 @@ struct eva_context {
     eva_vocab vocab;
 
     struct ggml_tensor * image;
+    struct ggml_tensor * text;
 
     size_t mem_per_token = 0;
 
     // decode output (2-dimensional array: [n_tokens][n_vocab])
-    std::vector<float> logits;
-    bool logits_all = false;
+    std::vector<float> label_probs;
 };
 
 //
@@ -209,7 +209,7 @@ static bool eva_model_load(
 
     auto & model = lctx.model;
     auto & image = lctx.image;
-    //auto & vocab = lctx.vocab;
+    auto & text  = lctx.text;
 
 
     //load image
@@ -243,6 +243,21 @@ static bool eva_model_load(
     image = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, ne[0], ne[1], ne[2]);
     fin.read(reinterpret_cast<char *>(image->data), ggml_nbytes(image));
     fin.close();
+
+    const int N = 3;
+    text = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, model.hparams.text_hparams.context_length, N);
+    ((int*)(text->data))[0] = 49406;
+    ((int*)(text->data))[1] = 320;
+    ((int*)(text->data))[2] = 22697;
+    ((int*)(text->data))[3] = 49407;
+    ((int*)(text->data))[0+77] = 49406;
+    ((int*)(text->data))[1+77] = 320;
+    ((int*)(text->data))[2+77] = 1929;
+    ((int*)(text->data))[3+77] = 49407;
+    ((int*)(text->data))[0+77*2] = 49406;
+    ((int*)(text->data))[1+77*2] = 320;
+    ((int*)(text->data))[2+77*2] = 2368;
+    ((int*)(text->data))[3+77*2] = 49407;
 
 
     fin = std::ifstream(fname, std::ios::binary);
@@ -708,7 +723,7 @@ static bool eva_model_load(
 static bool eva_eval_internal(
         eva_context & lctx,
         const int   n_threads) {
-    const int64_t t_start_us = ggml_time_us();
+    // const int64_t t_start_us = ggml_time_us();
 
     //const int N = n_tokens;
 
@@ -718,6 +733,24 @@ static bool eva_eval_internal(
     const auto & text_hparams = hparams.text_hparams;
 
     const int n_embd  = hparams.n_embd; //512
+
+    static size_t result_buf_size = (n_embd+1)*101*8;
+    static void * result_buf = malloc(result_buf_size);
+
+    struct ggml_init_params result_params = {
+        /*.mem_size   =*/ result_buf_size,
+        /*.mem_buffer =*/ result_buf,
+    };
+
+    ggml_cgraph result_gf = {};
+    result_gf.n_threads = n_threads;
+
+    struct ggml_context * ctx = ggml_init(result_params);
+    if (!ctx) {
+        fprintf(stderr, "%s: failed to result context\n", __func__);
+        return false;
+    }
+    struct ggml_tensor * image_features = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
 
     const int image_size = vision_hparams.image_size;
     const int n_vision_layer = vision_hparams.layers;
@@ -730,33 +763,21 @@ static bool eva_eval_internal(
     const int n_head = vision_width/head_width; //12
     const int ratio_width = vision_width*ratio; //2048
 
-    const int context_length = text_hparams.context_length;
-    const int vocab_size = text_hparams.vocab_size;
-    const int text_width = text_hparams.width;
-    const int heads = text_hparams.heads;
-    const int n_text_layer = text_hparams.layers;
-    const bool xattn = text_hparams.xattn;
-    const bool fusedLN = text_hparams.fusedLN;
-    //const int n_ctx   = hparams.n_ctx;
-    //const int n_head  = hparams.n_head;
-    //const int n_vocab = hparams.n_vocab;
-    //const int n_rot   = hparams.n_embd/hparams.n_head;
-
-    auto & mem_per_token = lctx.mem_per_token;
-
+    //vision tower
+    {
     // TODO: fix this hardcoded size
-    static size_t buf_size = 512u*1024*1024*2;
-    static void * buf = malloc(buf_size);
+    static size_t vision_buf_size = 512u*1024*1024*2;
+    static void * vision_buf = malloc(vision_buf_size);
 
-    struct ggml_init_params params = {
-        /*.mem_size   =*/ buf_size,
-        /*.mem_buffer =*/ buf,
+    struct ggml_init_params vision_params = {
+        /*.mem_size   =*/ vision_buf_size,
+        /*.mem_buffer =*/ vision_buf,
     };
 
-    ggml_cgraph gf = {};
-    gf.n_threads = n_threads;
+    ggml_cgraph vision_gf = {};
+    vision_gf.n_threads = n_threads;
 
-    struct ggml_context * ctx0 = ggml_init(params);
+    struct ggml_context * ctx0 = ggml_init(vision_params);
     struct ggml_tensor * vision_proj = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num);
     uint16_t * conv_kernel = (uint16_t*)malloc(patch_size*patch_size*3*sizeof(uint16_t));
     uint16_t * patch = (uint16_t*)malloc(patch_size*patch_size*3*sizeof(uint16_t));
@@ -1023,205 +1044,260 @@ static bool eva_eval_internal(
     }
     inpL = ggml_add(ctx0, ggml_mul_mat(ctx0, model.vision_model.head_weight, inpL), bh);
 
-    ggml_build_forward_expand(&gf, inpL);
-    ggml_graph_compute       (ctx0, &gf);
+    ggml_build_forward_expand(&vision_gf, inpL);
+    ggml_graph_compute       (ctx0, &vision_gf);
+
+    //auto & image_features = lctx.image_features;
+    //image_features.resize(n_embd);
+    //memcpy(image_features.data(), (float *) ggml_get_data(inpL), sizeof(float)*n_embd);
+    memcpy((float*)(image_features->data), (float *) ggml_get_data(inpL), sizeof(float)*n_embd);
+
     ggml_free(ctx0);
-    //half_to_float(*(unsigned short*)model.vision_model.cls_token->data)==0.12561
-    //half_to_float(*(((unsigned short*)model.vision_model.cls_token->data)+1))==-0.595214844
-    //*((float*)(lctx.image->data)+17070)==0.324509382([0, 76, 46])
-    //half_to_float(*(unsigned short*)model.vision_model.patch_embed_weight->data)==-0.0361633301
-/*
-    struct ggml_tensor * embd = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, N);
-    memcpy(embd->data, tokens, N*ggml_element_size(embd));
+    }
 
-    struct ggml_tensor * inpL = ggml_get_rows(ctx0, model.tok_embeddings, embd);
+    const int context_length = text_hparams.context_length; //77
+    const int vocab_size = text_hparams.vocab_size; //49408
+    const int text_width = text_hparams.width; //512
+    const int heads = text_hparams.heads; //8
+    const int text_head_width = text_width/heads; //64
+    const int n_text_layer = text_hparams.layers; //12
+    //const bool xattn = text_hparams.xattn;
+    //const bool fusedLN = text_hparams.fusedLN;
+    struct ggml_tensor * embds = lctx.text; //[3,77]
+    const int total_label_num = embds->ne[1];
+    struct ggml_tensor * text_features = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, total_label_num);
 
-    for (int il = 0; il < n_layer; ++il) {
-        struct ggml_tensor * inpSA = inpL;
+    //text tower
+    {
+    static size_t text_buf_size = 512u*1024*1024;
+    static void * text_buf = malloc(text_buf_size);
 
-        struct ggml_tensor * cur;
+    struct ggml_init_params text_params = {
+        /*.mem_size   =*/ text_buf_size,
+        /*.mem_buffer =*/ text_buf,
+    };
 
-        // norm
-        {
-            cur = ggml_rms_norm(ctx0, inpL);
+    ggml_cgraph text_gf = {};
+    text_gf.n_threads = n_threads;
 
-            // cur = attention_norm*cur
-            cur = ggml_mul(ctx0,
-                        ggml_repeat(ctx0, model.layers[il].attention_norm, cur),
-                        cur);
-        }
-
-        // self-attention
-        {
-            struct ggml_tensor * Qcur = ggml_mul_mat(ctx0, model.layers[il].wq, cur);
-            struct ggml_tensor * Kcur = ggml_mul_mat(ctx0, model.layers[il].wk, cur);
-            struct ggml_tensor * Vcur = ggml_mul_mat(ctx0, model.layers[il].wv, cur);
-
-            // store key and value to memory
-            if (N >= 1) {
-                struct ggml_tensor * k = ggml_view_1d(ctx0, model.memory_k, N*n_embd, (ggml_element_size(model.memory_k)*n_embd)*(il*n_ctx + n_past));
-                struct ggml_tensor * v = ggml_view_1d(ctx0, model.memory_v, N*n_embd, (ggml_element_size(model.memory_v)*n_embd)*(il*n_ctx + n_past));
-
-                ggml_build_forward_expand(&gf, ggml_cpy(ctx0, Kcur, k));
-                ggml_build_forward_expand(&gf, ggml_cpy(ctx0, Vcur, v));
+    int eot_id = 0;
+    for (int label_num = 0; label_num < total_label_num; label_num++){
+        struct ggml_context * ctx1 = ggml_init(text_params);
+        struct ggml_tensor * embd = ggml_new_tensor_1d(ctx1, GGML_TYPE_I32, context_length);
+        memcpy(ggml_get_data(embd), (int *) ggml_get_data(embds) + label_num * context_length, sizeof(int)*context_length);
+        //get eot_id
+        for (int i = 0; i < context_length; i++){
+            if (*((int*)(embd->data)+i) == vocab_size-1){
+                eot_id = i;
+                break;
             }
+        }
+        struct ggml_tensor * eot_id_tensor = ggml_new_i32(ctx1, eot_id);
 
-            // Q = Qcur.contiguous().view(n_embd/n_head, n_head, N).permute(0, 2, 1, 3)
+        //Embedding
+        struct ggml_tensor * inpL = ggml_get_rows(ctx1, model.text_model.token_embed, embd); //[77,512]
+
+        //Positional Encoding
+        struct ggml_tensor * positional_embedding = ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, text_width, context_length);
+        for (int i = 0; i < text_width*context_length; i++){
+            *((float*)(positional_embedding->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.pos_embeddings->data)+i));
+        }
+        inpL = ggml_add(ctx1, inpL, positional_embedding);
+
+        //Transformer layers
+        for (int il = 0; il < n_text_layer; il++){
+            struct ggml_tensor * inpSA = inpL;
+
+            struct ggml_tensor * cur;
+
+            // norm1
+            cur = ggml_norm(ctx1, inpL);
+
+            struct ggml_tensor * norm1_weight = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+            for (int i = 0; i < text_width; i++){
+                *((float*)(norm1_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].norm1_weight->data)+i));
+            }
+            struct ggml_tensor * norm1_weight_broadcast = ggml_repeat(ctx1, norm1_weight, cur);
+            cur = ggml_mul(ctx1, cur, norm1_weight_broadcast);
+
+            struct ggml_tensor * norm1_bias = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+            for (int i = 0; i < text_width; i++){
+                *((float*)(norm1_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].norm1_bias->data)+i));
+            }
+            struct ggml_tensor * norm1_bias_broadcast = ggml_repeat(ctx1, norm1_bias, cur);
+            cur = ggml_add(ctx1, cur, norm1_bias_broadcast);
+
+            // in_projection
+            struct ggml_tensor * in_proj_bias = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width*3);
+            for (int i = 0; i < text_width*3; i++){
+                *((float*)(in_proj_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].in_proj_bias->data)+i));
+            }
+            struct ggml_tensor * in_proj_bias_broadcast = ggml_repeat(ctx1, in_proj_bias, ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, text_width*3, context_length));
+
+            struct ggml_tensor * q_k_v = ggml_add(ctx1, ggml_mul_mat(ctx1, model.text_model.layers[il].in_proj_weight, cur), in_proj_bias_broadcast); //[77,1536]
+
+            struct ggml_tensor * Qcur = ggml_split_get_first(ctx1, q_k_v, 0, text_width);
+            struct ggml_tensor * k_v = ggml_split_get_second(ctx1, q_k_v, 0, text_width);
+            struct ggml_tensor * Kcur = ggml_split_get_first(ctx1, k_v, 0, text_width);
+            struct ggml_tensor * Vcur = ggml_split_get_second(ctx1, k_v, 0, text_width); //[77,512]
+
+            // Q = Qcur.contiguous().view(context_length=77, heads = 8, head_width=64).permute(0, 2, 1, 3).contiguous()
             struct ggml_tensor * Q =
-                ggml_permute(ctx0,
-                        ggml_rope(ctx0,
-                            ggml_cpy(ctx0,
+                ggml_cpy(ctx1,
+                ggml_permute(ctx1,
+                            ggml_cpy(ctx1,
                                 Qcur,
-                                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd/n_head, n_head, N)),
-                            n_past, n_rot, 0),
-                        0, 2, 1, 3);
-
-            // K = Kmem.view(n_embd/n_head, n_head, n_past + N).permute(0, 2, 1, 3)
+                                ggml_new_tensor_3d(ctx1, GGML_TYPE_F32, text_head_width, heads, context_length)),
+                        0, 2, 1, 3),
+                ggml_new_tensor_3d(ctx1, GGML_TYPE_F32, text_head_width, context_length, heads)); //[8,77,64]
+            // K = Kcur.contiguous().view(context_length=77, heads = 8, head_width=64).permute(0, 2, 1, 3)
             struct ggml_tensor * K =
-                ggml_permute(ctx0,
-                        ggml_rope(ctx0,
-                            ggml_reshape_3d(ctx0,
-                                ggml_view_1d(ctx0, model.memory_k, (n_past + N)*n_embd, il*n_ctx*ggml_element_size(model.memory_k)*n_embd),
-                                n_embd/n_head, n_head, n_past + N),
-                            n_past, n_rot, 1),
-                        0, 2, 1, 3);
+                ggml_permute(ctx1,
+                            ggml_cpy(ctx1,
+                                Kcur,
+                                ggml_new_tensor_3d(ctx1, GGML_TYPE_F32, text_head_width, heads, context_length)),
+                        0, 2, 1, 3); //[8,77,64]
+            // V = Vcur.contiguous().view(context_length=77, heads = 8, head_width=64).permute(0, 2, 1, 3)
+            struct ggml_tensor * V =
+                ggml_cpy(ctx1,
+                ggml_permute(ctx1,
+                            ggml_cpy(ctx1,
+                                Vcur,
+                                ggml_new_tensor_3d(ctx1, GGML_TYPE_F32, text_head_width, heads, context_length)),
+                        0, 2, 1, 3),
+                ggml_new_tensor_3d(ctx1, GGML_TYPE_F32, text_head_width, context_length, heads)); //[8,77,64]
 
-            // K * Q
-            struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q);
-
-            // KQ_scaled = KQ / sqrt(n_embd/n_head)
-            struct ggml_tensor * KQ_scaled =
-                ggml_scale(ctx0,
-                        KQ,
-                        ggml_new_f32(ctx0, 1.0f/sqrt(float(n_embd)/n_head))
-                        );
-
-            // KQ_masked = mask_past(KQ_scaled)
-            struct ggml_tensor * KQ_masked = ggml_diag_mask_inf(ctx0, KQ_scaled, n_past);
-
-            // KQ = soft_max(KQ_masked)
-            struct ggml_tensor * KQ_soft_max = ggml_soft_max(ctx0, KQ_masked);
-
-            // V_trans = Vmem.view(n_embd/n_head, n_head, n_past + N).permute(1, 2, 0, 3).contiguous()
-            struct ggml_tensor * V_trans =
-                ggml_cpy(ctx0,
-                    ggml_permute(ctx0,
-                            ggml_reshape_3d(ctx0,
-                                ggml_view_1d(ctx0, model.memory_v, (n_past + N)*n_embd, il*n_ctx*ggml_element_size(model.memory_v)*n_embd),
-                                n_embd/n_head, n_head, n_past + N),
-                            1, 2, 0, 3),
-                    ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_past + N, n_embd/n_head, n_head));
-
-            // KQV = transpose(V) * KQ_soft_max
-            struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V_trans, KQ_soft_max);
-
+            //Attention
+            struct ggml_tensor * scale = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, 1);
+            //*((float*)(scale->data)) = ggml_fp16_to_fp32(*((uint16_t*)(model.logit_scale->data)));
+            *((float*)(scale->data)) = 0.125;
+            struct ggml_tensor * Q_scaled = ggml_scale(ctx1, Q, scale);
+            // query @ key.transpose(-2, -1)
+            struct ggml_tensor * KQ = ggml_mul_mat(ctx1, K, Q_scaled); // [8,77,77]
+            // add attn bias
+            struct ggml_tensor * KQ_masked = ggml_diag_mask_inf(ctx1, KQ, 0); //inplace
+            // KQ = KQ.softmax(-1)
+            struct ggml_tensor * KQ_soft_max = ggml_soft_max(ctx1, KQ_masked); //inplace
+            // KQV = attn @ value
+            struct ggml_tensor * V_trans = ggml_cpy(ctx1, ggml_transpose(ctx1, V), ggml_new_tensor_3d(ctx1, GGML_TYPE_F32, context_length, text_head_width, heads));
+            struct ggml_tensor * KQV = ggml_mul_mat(ctx1, V_trans, KQ_soft_max); //[8,77,64]
             // KQV_merged = KQV.permute(0, 2, 1, 3)
-            struct ggml_tensor * KQV_merged = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
-
+            struct ggml_tensor * KQV_merged = ggml_permute(ctx1, KQV, 0, 2, 1, 3); //[77,8,64]
             // cur = KQV_merged.contiguous().view(n_embd, N)
-            cur = ggml_cpy(ctx0,
+            cur = ggml_cpy(ctx1,
                     KQV_merged,
-                    ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, N));
+                    ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, text_width, context_length)); //[77,512]           
 
-            // projection (no bias)
-            cur = ggml_mul_mat(ctx0,
-                    model.layers[il].wo,
-                    cur);
-        }
-
-        struct ggml_tensor * inpFF = ggml_add(ctx0, cur, inpSA);
-
-        // feed-forward network
-        {
-            // norm
-            {
-                cur = ggml_rms_norm(ctx0, inpFF);
-
-                // cur = ffn_norm*cur
-                cur = ggml_mul(ctx0,
-                        ggml_repeat(ctx0, model.layers[il].ffn_norm, cur),
-                        cur);
+            //out_projection
+            struct ggml_tensor * out_proj_bias = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+            for (int i = 0; i < text_width; i++){
+                *((float*)(out_proj_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].out_proj_bias->data)+i));
             }
+            struct ggml_tensor * out_proj_bias_broadcast = ggml_repeat(ctx1, out_proj_bias, cur);
+            cur = ggml_add(ctx1, ggml_mul_mat(ctx1, model.text_model.layers[il].out_proj_weight, cur), out_proj_bias_broadcast);
+        
 
-            struct ggml_tensor * tmp = ggml_mul_mat(ctx0,
-                    model.layers[il].w3,
-                    cur);
+            struct ggml_tensor * inpFF = ggml_add(ctx1, cur, inpSA); //[77,512]
+    
 
+            // feed-forward network
+        
 
-            cur = ggml_mul_mat(ctx0,
-                    model.layers[il].w1,
-                    cur);
+            //norm2
+            cur = ggml_norm(ctx1, inpFF);
 
-            // SILU activation
-            cur = ggml_silu(ctx0, cur);
+            struct ggml_tensor * norm2_weight = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+            for (int i = 0; i < text_width; i++){
+                *((float*)(norm2_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].norm2_weight->data)+i));
+            }
+            struct ggml_tensor * norm2_weight_broadcast = ggml_repeat(ctx1, norm2_weight, cur);
+            cur = ggml_mul(ctx1, cur, norm2_weight_broadcast);
 
-            cur = ggml_mul(ctx0, cur, tmp);
+            struct ggml_tensor * norm2_bias = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+            for (int i = 0; i < text_width; i++){
+                *((float*)(norm2_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].norm2_bias->data)+i));
+            }
+            struct ggml_tensor * norm2_bias_broadcast = ggml_repeat(ctx1, norm2_bias, cur);
+            cur = ggml_add(ctx1, cur, norm2_bias_broadcast);
 
-            cur = ggml_mul_mat(ctx0,
-                    model.layers[il].w2,
-                    cur);
+            //mlp
+            //c_fc:Linear(in_features=512, out_features=2048, bias=True)
+            struct ggml_tensor * c_fc_bias = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width*4);
+            for (int i = 0; i < text_width*4; i++){
+                *((float*)(c_fc_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].c_fc_bias->data)+i));
+            }
+            struct ggml_tensor * c_fc_bias_broadcast = ggml_repeat(ctx1, c_fc_bias, ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, text_width*4, context_length));
+            cur = ggml_add(ctx1, ggml_mul_mat(ctx1, model.text_model.layers[il].c_fc_weight, cur), c_fc_bias_broadcast);
+            //gelu:GELU(approximate=none)
+            cur = ggml_gelu(ctx1, cur); //[77,2048]
+            //c_proj:Linear(in_features=2048, out_features=512, bias=True)
+            struct ggml_tensor * c_proj_bias = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+            for (int i = 0; i < text_width; i++){
+                *((float*)(c_proj_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.layers[il].c_proj_bias->data)+i));
+            }
+            struct ggml_tensor * c_proj_bias_broadcast = ggml_repeat(ctx1, c_proj_bias, ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, text_width, context_length));
+            cur = ggml_add(ctx1, ggml_mul_mat(ctx1, model.text_model.layers[il].c_proj_weight, cur), c_proj_bias_broadcast);
+
+            cur  = ggml_add(ctx1, cur, inpFF);
+
+            // input for next layer
+            inpL = cur; //[77,512]
         }
 
-        cur  = ggml_add(ctx0, cur, inpFF);
+        //norm
+        inpL = ggml_norm(ctx1, inpL);
 
-        // input for next layer
-        inpL = cur;
+        struct ggml_tensor * final_norm_weight = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+        for (int i = 0; i < text_width; i++){
+            *((float*)(final_norm_weight->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.ln_final_weight->data)+i));
+        }
+        struct ggml_tensor * norm_weight_broadcast = ggml_repeat(ctx1, final_norm_weight, inpL);
+        inpL = ggml_mul(ctx1, inpL, norm_weight_broadcast);
+
+        struct ggml_tensor * final_norm_bias = ggml_new_tensor_1d(ctx1, GGML_TYPE_F32, text_width);
+        for (int i = 0; i < text_width; i++){
+            *((float*)(final_norm_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.ln_final_bias->data)+i));
+        }
+        struct ggml_tensor * final_norm_bias_broadcast = ggml_repeat(ctx1, final_norm_bias, inpL);
+        inpL = ggml_add(ctx1, inpL, final_norm_bias_broadcast);
+
+
+        struct ggml_tensor * text_proj = ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, text_width, text_width);
+        for (int i = 0; i < text_width*text_width; i++){
+            *((float*)(text_proj->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.text_model.text_proj->data)+i));
+        }
+        struct ggml_tensor * text_proj_trans = ggml_cpy(ctx1, ggml_transpose(ctx1, text_proj), ggml_new_tensor_2d(ctx1, GGML_TYPE_F32, text_width, text_width));
+        //take features from the eot embedding (eot_token is the highest number in each sequence)
+        //eot_token @ text_projection
+        inpL = ggml_mul_mat(ctx1, text_proj_trans, ggml_get_rows(ctx1, inpL, eot_id_tensor));
+        ggml_build_forward_expand(&text_gf, inpL);
+        ggml_graph_compute       (ctx1, &text_gf);
+
+        //memcpy(text_features.data() + label_num*text_width, (float *) ggml_get_data(inpL), sizeof(float)*text_width);
+        memcpy((float *) ggml_get_data(text_features) + label_num*text_width, (float *) ggml_get_data(inpL), sizeof(float)*n_embd);
+
+        ggml_free(ctx1);
     }
-
-    // norm
-    {
-        inpL = ggml_rms_norm(ctx0, inpL);
-
-        // inpL = norm*inpL
-        inpL = ggml_mul(ctx0,
-                    ggml_repeat(ctx0, model.norm, inpL),
-                    inpL);
     }
+    //nomalize image_features and text_features
+    //image_features /= image_features.norm(dim=-1, keepdim=True)
+    image_features = ggml_l2norm(ctx, image_features);
+    //text_features /= text_features.norm(dim=-1, keepdim=True)
+    text_features = ggml_l2norm(ctx, text_features);
+    //text_probs = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+    struct ggml_tensor * text_probs = ggml_soft_max(ctx, 
+                                            ggml_scale(ctx, 
+                                                ggml_mul_mat(ctx, text_features, image_features), 
+                                                    ggml_new_f32(ctx, 100.0)));
+    ggml_build_forward_expand(&result_gf, text_probs);
+    ggml_graph_compute       (ctx, &result_gf);
 
-    // lm_head
-    {
-        inpL = ggml_mul_mat(ctx0, model.output, inpL);
-    }
+    auto & label_probs = lctx.label_probs;
+    label_probs.resize(total_label_num);
+    memcpy(label_probs.data(), (float *) ggml_get_data(text_probs), sizeof(float)*total_label_num);
 
-    // logits -> probs
-    //inpL = ggml_soft_max(ctx0, inpL);
+    ggml_free(ctx);
 
-    // run the computation
-    ggml_build_forward_expand(&gf, inpL);
-    ggml_graph_compute       (ctx0, &gf);
-
-    //if (n_past%100 == 0) {
-    //    ggml_graph_print   (&gf);
-    //    ggml_graph_dump_dot(&gf, NULL, "gpt-2.dot");
-    //}
-
-    //embd_w.resize(n_vocab*N);
-    //memcpy(embd_w.data(), ggml_get_data(inpL), sizeof(float)*n_vocab*N);
-
-    auto & logits_out = lctx.logits;
-
-    if (lctx.logits_all) {
-        logits_out.resize(n_vocab * N);
-        memcpy(logits_out.data(), (float *) ggml_get_data(inpL), sizeof(float)*n_vocab*N);
-    } else {
-        // return result for just the last token
-        logits_out.resize(n_vocab);
-        memcpy(logits_out.data(), (float *) ggml_get_data(inpL) + (n_vocab*(N-1)), sizeof(float)*n_vocab);
-    }
-
-    if (mem_per_token == 0) {
-        mem_per_token = ggml_used_mem(ctx0)/N;
-    }
-    //fprintf(stderr, "used_mem = %zu\n", ggml_used_mem(ctx0));
-
-    ggml_free(ctx0);
-
-    // measure the performance only for the single-token evals
-    if (N == 1) {
-        lctx.t_eval_us += ggml_time_us() - t_start_us;
-        lctx.n_eval++;
-    }
-*/
     return true;
 }
 
@@ -1234,7 +1310,7 @@ struct eva_context * eva_init_from_file(const char * path_model, const char * im
 
     eva_context * ctx = new eva_context;
 
-    ggml_type type_memory = GGML_TYPE_F32;
+    //ggml_type type_memory = GGML_TYPE_F32;
 
     if (!eva_model_load(path_model, image_path, *ctx)) {
         fprintf(stderr, "%s: failed to load model\n", __func__);
