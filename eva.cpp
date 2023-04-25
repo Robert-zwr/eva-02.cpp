@@ -2,14 +2,23 @@
 
 #include "ggml.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb/stb_image_resize.h"
+
 #include <cinttypes>
 #include <fstream>
 #include <random>
 #include <unordered_map>
+#include <unordered_set>
 #include <queue>
 #include <regex>
 #include <cassert>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 
 
 struct vision_cfg {
@@ -157,13 +166,8 @@ struct eva_vocab {
     using id    = int32_t;
     using token = std::string;
 
-    struct token_score {
-        token tok;
-        float score;
-    };
-
-    std::unordered_map<token, id> token_to_id;
-    std::vector<token_score> id_to_token;
+    std::unordered_map<token, id> encoder;
+    std::map<std::vector<token>, int> bpe_ranks;
 };
 
 struct eva_context {
@@ -190,6 +194,162 @@ struct eva_context {
     std::vector<float> label_probs;
 };
 
+//image_preprocess
+static float* image_preprosess(std::string img_path, const int img_size){
+    std::string src_name(img_path);
+    int cols, rows, img_channels;
+    int expected_channels = 3;
+    const int image_size = img_size;
+
+    unsigned char* raw_img = stbi_load(src_name.c_str(), &cols, &rows, &img_channels, STBI_rgb);
+    printf("image height: %d, width: %d\n", rows, cols);
+
+    //torchvision.transforms.Resize(image_size, interpolation=InterpolationMode.BICUBIC)
+    int short_edge = std::min(rows, cols);
+    float ratio = static_cast<float>(image_size) / short_edge;
+    int resize_rows = rows * ratio;
+    int resize_cols = cols * ratio;
+    auto *resized_img = (unsigned char *) malloc(resize_rows * resize_cols * STBI_rgb);
+    stbir_resize(raw_img, cols, rows, 0, resized_img, resize_cols, resize_rows, 0, STBIR_TYPE_UINT8, expected_channels, STBIR_ALPHA_CHANNEL_NONE, 0,
+                 STBIR_EDGE_CLAMP, STBIR_EDGE_CLAMP,
+                 STBIR_FILTER_CATMULLROM, STBIR_FILTER_CATMULLROM,
+                 STBIR_COLORSPACE_SRGB, nullptr);
+    
+    // torchvision.transforms.CenterCrop(image_size)
+    int crop_width = image_size;
+    int crop_height = image_size;
+    // calulate crop position's upper-left coordinates
+    int crop_x = (resize_cols - crop_width) / 2;
+    int crop_y = (resize_rows - crop_height) / 2;
+    unsigned char* cropped_img = new unsigned char[crop_width * crop_height * expected_channels];
+    // crop the image
+    for (int y = 0; y < crop_height; y++) {
+        for (int x = 0; x < crop_width; x++) {
+            int index = ((crop_y + y) * resize_cols + (crop_x + x)) * expected_channels;
+            int crop_index = (y * crop_width + x) * expected_channels;
+            for (int c = 0; c < expected_channels; c++) {
+                cropped_img[crop_index + c] = resized_img[index + c];
+            }
+        }
+    }
+
+    //torchvision.transforms.ToTensor()
+    int* int_image = new int[image_size*image_size*expected_channels];
+    for (int i = 0; i < image_size * image_size; i++) {
+        int_image[i] = (int)cropped_img[i * expected_channels];                           // R
+        int_image[i+image_size*image_size] = (int)cropped_img[i*expected_channels+1];     // G
+        int_image[i+image_size*image_size*2] = (int)cropped_img[i*expected_channels+2];   // B
+    }
+
+    //torchvision.transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
+    float* float_image = new float[image_size*image_size*expected_channels];
+    for (int i = 0; i < image_size * image_size; i++) {
+        float_image[i] = (int_image[i] / 255.0 - 0.48145466) / 0.26862954;
+        float_image[i + image_size * image_size] = (int_image[i + image_size * image_size] / 255.0 - 0.4578275) / 0.26130258;
+        float_image[i + image_size * image_size * 2] = (int_image[i + image_size * image_size * 2] / 255.0 - 0.40821073) / 0.27577711;
+    }
+
+    stbi_image_free(raw_img);
+    stbi_image_free(resized_img);
+    stbi_image_free(cropped_img);
+    delete[] int_image;
+
+    return float_image;
+}
+
+
+std::string whitespace_clean_and_tolower(std::string text) {
+    // Replace one or more whitespace characters with a single space character
+    std::regex pattern("\\s+");
+    std::string replacement(" ");
+    std::string cleaned_text = std::regex_replace(text, pattern, replacement);
+    
+    // Remove leading and trailing whitespace characters
+    cleaned_text.erase(0, cleaned_text.find_first_not_of(" "));
+    cleaned_text.erase(cleaned_text.find_last_not_of(" ") + 1);
+
+    std::transform(cleaned_text.begin(), cleaned_text.end(), cleaned_text.begin(), [](unsigned char c) { return std::tolower(c); });
+    
+    return cleaned_text;
+}
+
+std::vector<std::string> regex(const std::string& text) {
+    std::vector<std::string> tokens;
+    // Match the pattern using regex
+    std::regex pattern(R"([^\s\p{L}\p{N}]+)");
+    std::smatch match;
+    std::string::const_iterator search_start(text.cbegin());
+    while (std::regex_search(search_start, text.cend(), match, pattern)) {
+        if (match[0].length() > 0) {
+            tokens.push_back(match[0]);
+        }
+        search_start = match.suffix().first;
+    }
+    return tokens;
+}
+
+// Return vector of symbol pairs in a word.
+// Word is represented as vector of symbols (symbols being variable-length strings).
+std::vector<std::vector<std::string>> get_pairs(const std::vector<std::string>& word) {
+    std::vector<std::vector<std::string>> pairs;
+    for (size_t i = 0; i < word.size() - 1; ++i) {
+        std::vector<std::string> pair{word[i], word[i + 1]};
+        pairs.push_back(pair);
+    }
+    return pairs;
+}
+
+// Apply byte pair encoding to token.
+std::string bpe(std::string& token, const std::map<std::vector<std::string>, int>& bpe_ranks, std::map<std::string, std::string>& cache) {
+    if (cache.find(token) != cache.end()) {
+        return cache[token];
+    }
+    std::vector<std::string> word(token.size() - 1);
+    for (int i = 0; i < token.size() - 1; ++i) {
+        word[i] = std::string(1, token[i]);
+    }
+    word.push_back(token.substr(token.size() - 1) + "</w>");
+    std::vector<std::vector<std::string>> pairs = get_pairs(word);
+    if (pairs.empty()) {
+        return token + "</w>";
+    }
+    
+    while (true) {
+        std::vector<std::string> best_pair;
+        int best_rank = INT_MAX;
+        for (const auto& pair : pairs) {
+            if (bpe_ranks.find(pair) != bpe_ranks.end() && bpe_ranks.at(pair) < best_rank) {
+                best_pair = pair;
+                best_rank = bpe_ranks.at(pair);
+            }
+        }
+        if (best_pair.empty()) {
+            break;
+        }
+        std::vector<std::string> new_word;
+        for (size_t i = 0; i < word.size(); ++i) {
+            if (i < word.size() - 1 && word[i] == best_pair[0] && word[i + 1] == best_pair[1]) {
+                new_word.push_back(best_pair[0] + best_pair[1]);
+                i += 1;
+            } else {
+                new_word.push_back(word[i]);
+            }
+        }
+        word = new_word;
+        if (word.size() == 1) {
+            break;
+        }
+        pairs = get_pairs(word);
+    }
+    std::string new_token = "";
+    for (const auto& s : word) {
+        new_token += s + " ";
+    }
+    new_token.pop_back();  // Remove trailing space
+    cache[token] = new_token;
+    return new_token;
+}
+
 //
 // model loading
 //
@@ -197,21 +357,22 @@ struct eva_context {
 static bool eva_model_load(
             const std::string & fname,
             const std::string & image_path,
-            eva_context & lctx)
+            const std::string & label_text,
+            eva_context & ectx)
     {
     fprintf(stderr, "%s: loading model from '%s' - please wait ...\n", __func__, fname.c_str());
 
     const int64_t t_start_us = ggml_time_us();
 
-    lctx.t_start_us = t_start_us;
+    ectx.t_start_us = t_start_us;
 
     std::vector<char> f_buf(1024*1024);
 
-    auto & model = lctx.model;
-    auto & image = lctx.image;
-    auto & text  = lctx.text;
-
-
+    auto & model = ectx.model;
+    auto & image = ectx.image;
+    auto & text  = ectx.text;
+    auto & vocab = ectx.vocab;
+    /*
     //load image
     auto fin = std::ifstream(image_path, std::ios::binary);
     fin.rdbuf()->pubsetbuf(f_buf.data(), f_buf.size());
@@ -226,41 +387,29 @@ static bool eva_model_load(
                 __func__, dims, 3);
         return false;
     }
-
     int32_t nelements = 1;
-    int32_t ne[4] = {dims, 1, 1, 1};
+    int32_t ne[4] = {1, 1, 1, 1};
     for (int i = 0; i < dims; ++i) {
         fin.read(reinterpret_cast<char *>(&ne[i]), sizeof(ne[i]));
         nelements *= ne[i];
     }
     static size_t image_buf_size = 1.2*ne[0]*ne[1]*ne[2]*ggml_type_sizef(GGML_TYPE_F32);
+    static void * image_buf = malloc(image_buf_size);*/
+    const int img_size = model.hparams.vision_hparams.image_size;
+    static size_t image_buf_size = 1.2*img_size*img_size*3*ggml_type_sizef(GGML_TYPE_F32);
     static void * image_buf = malloc(image_buf_size);
     struct ggml_init_params params = {
         /*.mem_size   =*/ image_buf_size,
         /*.mem_buffer =*/ image_buf,
     };
-    struct ggml_context * ctx0 = ggml_init(params);
-    image = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, ne[0], ne[1], ne[2]);
-    fin.read(reinterpret_cast<char *>(image->data), ggml_nbytes(image));
-    fin.close();
+    struct ggml_context * ctx_src = ggml_init(params);
+    image = ggml_new_tensor_3d(ctx_src, GGML_TYPE_F32, img_size, img_size, 3);
+    auto preprocessed_image = image_preprosess(image_path, img_size);
+    memcpy(image->data, preprocessed_image, ggml_nbytes(image));
+    //fin.read(reinterpret_cast<char *>(image->data), ggml_nbytes(image));
+    //fin.close();
 
-    const int N = 3;
-    text = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, model.hparams.text_hparams.context_length, N);
-    ((int*)(text->data))[0] = 49406;
-    ((int*)(text->data))[1] = 320;
-    ((int*)(text->data))[2] = 22697;
-    ((int*)(text->data))[3] = 49407;
-    ((int*)(text->data))[0+77] = 49406;
-    ((int*)(text->data))[1+77] = 320;
-    ((int*)(text->data))[2+77] = 1929;
-    ((int*)(text->data))[3+77] = 49407;
-    ((int*)(text->data))[0+77*2] = 49406;
-    ((int*)(text->data))[1+77*2] = 320;
-    ((int*)(text->data))[2+77*2] = 2368;
-    ((int*)(text->data))[3+77*2] = 49407;
-
-
-    fin = std::ifstream(fname, std::ios::binary);
+    auto fin = std::ifstream(fname, std::ios::binary);
     fin.rdbuf()->pubsetbuf(f_buf.data(), f_buf.size());
     if (!fin) {
         fprintf(stderr, "%s: failed to open '%s'\n", __func__, fname.c_str());
@@ -292,10 +441,9 @@ static bool eva_model_load(
     }
 
     //int n_ff = 0;
-
+    auto & hparams = model.hparams;
     // load hparams
     {
-        auto & hparams = model.hparams;
         auto & vision_hparams = hparams.vision_hparams;
         auto & text_hparams = hparams.text_hparams;
         int32_t flag = 0;
@@ -336,6 +484,104 @@ static bool eva_model_load(
         fprintf(stderr, "%s: width  = %d\n", __func__, text_hparams.width);
         fprintf(stderr, "%s: n_head  = %d\n", __func__, text_hparams.heads);
         fprintf(stderr, "%s: n_layers = %d\n", __func__, text_hparams.layers);
+    }
+
+    // load vocab
+    {
+        //load encoder
+        std::string word;
+        //vocab.encoder.resize(model.hparams.text_hparams.vocab_size);
+        std::string first;
+        std::string second;
+        std::vector<char> tmp(64);
+
+        for (int i = 0; i < model.hparams.text_hparams.vocab_size; i++) {
+            uint32_t len;
+            fin.read((char *) &len, sizeof(len));
+
+            word.resize(len);
+            if (len > 0) {
+                tmp.resize(len);
+                fin.read(tmp.data(), len);
+                word.assign(tmp.data(), len);
+            } else {
+                word.clear();
+            }
+            vocab.encoder[word] = i;
+            //fprintf(stderr, "%s: n_vocab = %d\n", __func__, i);
+        }
+
+        //load bpe_ranks
+        for (int i = 0; i < 49152-256-2; i++) {
+            uint32_t len;
+            //first one in pair
+            fin.read((char *) &len, sizeof(len));
+
+            first.resize(len);
+            if (len > 0) {
+                tmp.resize(len);
+                fin.read(tmp.data(), len);
+                first.assign(tmp.data(), len);
+            } else {
+                first.clear();
+            }
+
+            //second one in pair
+            fin.read((char *) &len, sizeof(len));
+
+            second.resize(len);
+            if (len > 0) {
+                tmp.resize(len);
+                fin.read(tmp.data(), len);
+                second.assign(tmp.data(), len);
+            } else {
+                second.clear();
+            }
+            //vocab.encoder[word] = i;
+            std::vector<std::string> pair = {first, second};
+            vocab.bpe_ranks[pair] = i;
+            //fprintf(stderr, "%s: n_pair = %d\n", __func__, i);
+        }
+    }
+
+    //tokenize
+    std::vector<std::string> labels;
+    {
+        std::stringstream ss(label_text);
+        std::string label;
+        while (getline(ss, label, '/')) {
+            labels.push_back(whitespace_clean_and_tolower(label));
+        }
+
+        text = ggml_new_tensor_2d(ctx_src, GGML_TYPE_I32, model.hparams.text_hparams.context_length, labels.size());
+        int label_idx = 0;
+        int bpe_token_idx = 0;
+
+        for (auto& l : labels) {
+            ((int*)(text->data))[(bpe_token_idx++)+hparams.text_hparams.context_length*label_idx] = 49406;  //'<start_of_text>'
+            //((int*)(text->data))[(bpe_token_idx++)+hparams.text_hparams.context_length*label_idx] = 320;    //'a'
+            //printf("%s\n", l.c_str());
+            auto tokens = regex(l);
+            for (auto& t : tokens) {
+                std::map<std::string, std::string> cache;
+                t = bpe(t, vocab.bpe_ranks, cache);
+                std::vector<std::string> bpe_tokens;
+                std::stringstream sstream(t);
+                std::string bpe_token;
+                while (getline(sstream, bpe_token, ' ')) {
+                    bpe_tokens.push_back(bpe_token);
+                }
+                for (auto& bpe_t : bpe_tokens) {
+                    //printf("%s\n", bpe_t.c_str());
+                    int idx = vocab.encoder[bpe_t];
+                    //printf("%d\n", idx);
+                    ((int*)(text->data))[(bpe_token_idx++)+hparams.text_hparams.context_length*label_idx] = idx;
+                }
+            }
+            ((int*)(text->data))[bpe_token_idx+hparams.text_hparams.context_length*label_idx] = 49407;  //'<end_of_text>'
+            label_idx++;
+            bpe_token_idx = 0;
+        }
     }
 
     // for the big tensors, we have the option to store the data in 16-bit floats or quantized
@@ -708,26 +954,24 @@ static bool eva_model_load(
 
     //lctx.logits.reserve(lctx.model.hparams.n_ctx);
 
-    lctx.t_load_us = ggml_time_us() - t_start_us;
+    ectx.t_load_us = ggml_time_us() - t_start_us;
 
     return true;
 }
 
 // evaluate the transformer
 //
-//   - lctx:      llama context
-//   - tokens:    new batch of tokens to process
-//   - n_past:    the context size so far
+//   - ectx:      eva context
 //   - n_threads: number of threads to use
 //
 static bool eva_eval_internal(
-        eva_context & lctx,
+        eva_context & ectx,
         const int   n_threads) {
     // const int64_t t_start_us = ggml_time_us();
 
     //const int N = n_tokens;
 
-    const auto & model   = lctx.model;
+    const auto & model   = ectx.model;
     const auto & hparams = model.hparams;
     const auto & vision_hparams = hparams.vision_hparams;
     const auto & text_hparams = hparams.text_hparams;
@@ -789,7 +1033,7 @@ static bool eva_eval_internal(
             for (int c = 0; c < 3; c++){
                 for (int k = 0; k < patch_size; k++){
                     for (int m = 0; m < patch_size; m++){
-                        patch[c*patch_size*patch_size+k*patch_size+m] = ggml_fp32_to_fp16(*(((float*)(lctx.image->data))+(j/patch_num)*image_size*patch_size+(j%patch_num)*patch_size+c*image_size*image_size+k*image_size+m));
+                        patch[c*patch_size*patch_size+k*patch_size+m] = ggml_fp32_to_fp16(*(((float*)(ectx.image->data))+(j/patch_num)*image_size*patch_size+(j%patch_num)*patch_size+c*image_size*image_size+k*image_size+m));
                     }
                 }
             }
@@ -1063,7 +1307,7 @@ static bool eva_eval_internal(
     const int n_text_layer = text_hparams.layers; //12
     //const bool xattn = text_hparams.xattn;
     //const bool fusedLN = text_hparams.fusedLN;
-    struct ggml_tensor * embds = lctx.text; //[3,77]
+    struct ggml_tensor * embds = ectx.text; //[3,77]
     const int total_label_num = embds->ne[1];
     struct ggml_tensor * text_features = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, total_label_num);
 
@@ -1292,11 +1536,18 @@ static bool eva_eval_internal(
     ggml_build_forward_expand(&result_gf, text_probs);
     ggml_graph_compute       (ctx, &result_gf);
 
-    auto & label_probs = lctx.label_probs;
+    auto & label_probs = ectx.label_probs;
     label_probs.resize(total_label_num);
     memcpy(label_probs.data(), (float *) ggml_get_data(text_probs), sizeof(float)*total_label_num);
 
     ggml_free(ctx);
+
+    fprintf(stderr, "\n");
+    fprintf(stderr, "probs:\n");
+    for (auto & label_prob : label_probs) {
+        fprintf(stderr, "%f\n", label_prob);
+    }
+    fprintf(stderr, "\n");
 
     return true;
 }
@@ -1305,14 +1556,14 @@ static bool eva_eval_internal(
 // interface implementation
 //
 
-struct eva_context * eva_init_from_file(const char * path_model, const char * image_path) {
+struct eva_context * eva_init_from_file(const char * path_model, const char * image_path, const char * text) {
     ggml_time_init();
 
     eva_context * ctx = new eva_context;
 
     //ggml_type type_memory = GGML_TYPE_F32;
 
-    if (!eva_model_load(path_model, image_path, *ctx)) {
+    if (!eva_model_load(path_model, image_path, text, *ctx)) {
         fprintf(stderr, "%s: failed to load model\n", __func__);
         delete ctx;
         return nullptr;

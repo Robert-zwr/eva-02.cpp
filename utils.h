@@ -10,10 +10,10 @@
 #include <thread>
 
 //
-// CLI argument parsing
+// CLIP argument parsing
 //
 
-struct gpt_params {
+struct eva_params {
     int32_t seed          = -1;  // RNG seed
     int32_t n_threads     = std::min(4, (int32_t) std::thread::hardware_concurrency());
     int32_t n_predict     = 128; // new tokens to predict
@@ -29,8 +29,9 @@ struct gpt_params {
 
     int32_t n_batch = 8; // batch size for prompt processing
 
-    std::string model  = "models/lamma-7B/ggml-model.bin"; // model path
+    std::string model  = "models/EVA02-CLIP-B-16/ggml-model-f16.bin"; // model path
     std::string img    = ""; // image path
+    std::string text   = ""; 
     std::string prompt = "";
 
     std::vector<std::string> antiprompt; // string upon seeing which more user input is prompted
@@ -45,9 +46,9 @@ struct gpt_params {
     bool perplexity        = false; // compute perplexity over the prompt
 };
 
-bool gpt_params_parse(int argc, char ** argv, gpt_params & params);
+bool gpt_params_parse(int argc, char ** argv, eva_params & params);
 
-void gpt_print_usage(int argc, char ** argv, const gpt_params & params);
+void gpt_print_usage(int argc, char ** argv, const eva_params & params);
 
 std::string gpt_random_prompt(std::mt19937 & rng);
 

@@ -30,16 +30,24 @@ extern "C" __declspec(dllimport) int __stdcall SetConsoleMode(void* hConsoleHand
 
 int main(int argc, char ** argv) {
     ggml_time_init();
-
-    gpt_params params;
+    //if (argc != 2) {
+    //std::cerr << "Need 1 argument" << std::endl;
+    //std::cerr << "Usage: ./main image.png" << std::endl;
+    //return 0;
+    //}
+    //std::string src_name(argv[1]);
+    eva_params params;
     params.model = "/home/zwr/EVA_env/eva-02.cpp/models/EVA02-CLIP-B-16/ggml-model-f16.bin";
-    params.img = "/home/zwr/EVA_env/eva-02.cpp/temp/image.bin";
+    //params.img = "/home/zwr/EVA_env/eva-02.cpp/temp/image.bin";
+    params.img = "/home/zwr/EVA_env/eva-02.cpp/CLIP.png";
+    params.text = "a diagram/a dog/a cat";
+    //vector<string> words = {"diagram", "dog", "cat"};
 
     eva_context * ctx;
 
     // load the model
     {
-        ctx = eva_init_from_file(params.model.c_str(), params.img.c_str());
+        ctx = eva_init_from_file(params.model.c_str(), params.img.c_str(), params.text.c_str());
 
         if (ctx == NULL) {
             fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
