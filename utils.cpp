@@ -16,7 +16,7 @@
 bool params_parse(int argc, char ** argv, eva_params & params) {
     // determine sensible default number of threads.
     // std::thread::hardware_concurrency may not be equal to the number of cores, or may return 0.
-    params.n_threads = std::min(4, (int32_t) std::thread::hardware_concurrency());
+    params.n_threads = std::min(8, (int32_t) std::thread::hardware_concurrency());
 
     bool invalid_param = false;
     std::string arg;
@@ -71,7 +71,7 @@ void print_usage(int /*argc*/, char ** argv, const eva_params & params) {
     fprintf(stderr, "options:\n");
     fprintf(stderr, "  -h, --help            show this help message and exit\n");
     fprintf(stderr, "  -m FNAME, --model FNAME\n");
-    fprintf(stderr, "                        model path (default: %s)\n", params.model.c_str());
+    fprintf(stderr, "                        model path (temporarily only support EVA02-CLIP-B-16)");
     fprintf(stderr, "  -i FNAME, --image FNAME     path to a image to be evaluated\n");
     fprintf(stderr, "  -c 'str1/str2/str3', --caption 'str1/str2/str3'\n");
     fprintf(stderr, "                        optional captions/labels of the image,spilited by '/',surrounded by '' or \"\"\n");

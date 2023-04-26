@@ -304,7 +304,7 @@ std::string bpe(std::string& token, const std::map<std::vector<std::string>, int
         return cache[token];
     }
     std::vector<std::string> word(token.size() - 1);
-    for (int i = 0; i < token.size() - 1; ++i) {
+    for (int i = 0; i < (int)token.size() - 1; ++i) {
         word[i] = std::string(1, token[i]);
     }
     word.push_back(token.substr(token.size() - 1) + "</w>");

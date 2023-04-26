@@ -10,7 +10,7 @@ import torch
 
 def parse_args():
 
-    parser = argparse.ArgumentParser(description='Convert a LLaMA model checkpoint to a ggml compatible file')
+    parser = argparse.ArgumentParser(description='Convert a EVA-02-CLIP model checkpoint to a ggml compatible file')
     parser.add_argument('model_name',  help='directory containing the model checkpoint')
     return parser.parse_args()
 

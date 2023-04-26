@@ -1,6 +1,5 @@
 #include "utils.h"
 #include "ggml.h"
-#include "llama.h"
 #include "eva.h"
 
 #include <cassert>
@@ -15,9 +14,9 @@
 int main(int argc, char ** argv) {
     ggml_time_init();
     eva_params params;
-    params.model = "/home/zwr/EVA_env/eva-02.cpp/models/EVA02-CLIP-B-16/ggml-model-f16.bin";
-    //params.img = "/home/zwr/EVA_env/eva-02.cpp/temp/image.bin";
-    params.img = "/home/zwr/EVA_env/eva-02.cpp/CLIP.png";
+    params.model = "./models/EVA02-CLIP-B-16/ggml-model-f16.bin";
+    //params.img = "./temp/image.bin";
+    params.img = "CLIP.png";
     params.text = "a diagram/a dog/a cat";
 
     if (params_parse(argc, argv, params) == false) {
@@ -40,7 +39,7 @@ int main(int argc, char ** argv) {
     {
         fprintf(stderr, "\n");
         fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
-                params.n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
+                params.n_threads, std::thread::hardware_concurrency(), eva_print_system_info());
     }
 
     // inference

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.12) # Don't bump this version for no reason
-project("llama.cpp" C CXX)
+project("eva.cpp" C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -11,18 +11,18 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    set(LLAMA_STANDALONE ON)
+    set(EVA_STANDALONE ON)
 
     # configure project version
     # TODO
 else()
-    set(LLAMA_STANDALONE OFF)
+    set(EVA_STANDALONE OFF)
 endif()
 
 if (EMSCRIPTEN)
     set(BUILD_SHARED_LIBS_DEFAULT OFF)
 
-    option(LLAMA_WASM_SINGLE_FILE "llama: embed WASM inside the generated llama.js" ON)
+    option(EVA_WASM_SINGLE_FILE "eva: embed WASM inside the generated eva.js" ON)
 else()
     if (MINGW)
         set(BUILD_SHARED_LIBS_DEFAULT OFF)
@@ -37,31 +37,31 @@ endif()
 #
 
 # general
-option(LLAMA_STATIC                 "llama: static link libraries"                          OFF)
-option(LLAMA_NATIVE                 "llama: enable -march=native flag"                      OFF)
-option(LLAMA_LTO                    "llama: enable link time optimization"                  OFF)
+option(EVA_STATIC                 "eva: static link libraries"                          OFF)
+option(EVA_NATIVE                 "eva: enable -march=native flag"                      OFF)
+option(EVA_LTO                    "eva: enable link time optimization"                  OFF)
 
 # debug
-option(LLAMA_ALL_WARNINGS           "llama: enable all compiler warnings"                   ON)
-option(LLAMA_ALL_WARNINGS_3RD_PARTY "llama: enable all compiler warnings in 3rd party libs" OFF)
-option(LLAMA_GPROF                  "llama: enable gprof"                                   OFF)
+option(EVA_ALL_WARNINGS           "eva: enable all compiler warnings"                   ON)
+option(EVA_ALL_WARNINGS_3RD_PARTY "eva: enable all compiler warnings in 3rd party libs" OFF)
+option(EVA_GPROF                  "eva: enable gprof"                                   OFF)
 
 # sanitizers
-option(LLAMA_SANITIZE_THREAD        "llama: enable thread sanitizer"                        OFF)
-option(LLAMA_SANITIZE_ADDRESS       "llama: enable address sanitizer"                       OFF)
-option(LLAMA_SANITIZE_UNDEFINED     "llama: enable undefined sanitizer"                     OFF)
+option(EVA_SANITIZE_THREAD        "eva: enable thread sanitizer"                        OFF)
+option(EVA_SANITIZE_ADDRESS       "eva: enable address sanitizer"                       OFF)
+option(EVA_SANITIZE_UNDEFINED     "eva: enable undefined sanitizer"                     OFF)
 
 # instruction set specific
-option(LLAMA_AVX                    "llama: enable AVX"                                     ON)
-option(LLAMA_AVX2                   "llama: enable AVX2"                                    ON)
-option(LLAMA_FMA                    "llama: enable FMA"                                     ON)
+option(EVA_AVX                    "eva: enable AVX"                                     ON)
+option(EVA_AVX2                   "eva: enable AVX2"                                    ON)
+option(EVA_FMA                    "eva: enable FMA"                                     ON)
 
 # 3rd party libs
-option(LLAMA_ACCELERATE             "llama: enable Accelerate framework"                    ON)
-option(LLAMA_OPENBLAS               "llama: use OpenBLAS"                                   OFF)
+option(EVA_ACCELERATE             "eva: enable Accelerate framework"                    ON)
+option(EVA_OPENBLAS               "eva: use OpenBLAS"                                   OFF)
 
-option(LLAMA_BUILD_TESTS            "llama: build tests"    ${LLAMA_STANDALONE})
-option(LLAMA_BUILD_EXAMPLES         "llama: build examples" ${LLAMA_STANDALONE})
+option(EVA_BUILD_TESTS            "eva: build tests"    ${EVA_STANDALONE})
+option(EVA_BUILD_EXAMPLES         "eva: build examples" ${EVA_STANDALONE})
 
 #
 # Compile flags
@@ -73,32 +73,32 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 if (NOT MSVC)
-    if (LLAMA_SANITIZE_THREAD)
+    if (EVA_SANITIZE_THREAD)
         add_compile_options(-fsanitize=thread)
     endif()
 
-    if (LLAMA_SANITIZE_ADDRESS)
+    if (EVA_SANITIZE_ADDRESS)
         add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
     endif()
 
-    if (LLAMA_SANITIZE_UNDEFINED)
+    if (EVA_SANITIZE_UNDEFINED)
         add_compile_options(-fsanitize=undefined)
     endif()
 endif()
 
-if (APPLE AND LLAMA_ACCELERATE)
+if (APPLE AND EVA_ACCELERATE)
     find_library(ACCELERATE_FRAMEWORK Accelerate)
     if (ACCELERATE_FRAMEWORK)
         message(STATUS "Accelerate framework found")
 
         add_compile_definitions(GGML_USE_ACCELERATE)
-        set(LLAMA_EXTRA_LIBS ${LLAMA_EXTRA_LIBS} ${ACCELERATE_FRAMEWORK})
+        set(EVA_EXTRA_LIBS ${EVA_EXTRA_LIBS} ${ACCELERATE_FRAMEWORK})
     else()
         message(WARNING "Accelerate framework not found")
     endif()
 endif()
-if (LLAMA_OPENBLAS)
-    if (LLAMA_STATIC)
+if (EVA_OPENBLAS)
+    if (EVA_STATIC)
         set(BLA_STATIC ON)
     endif()
 
@@ -114,7 +114,7 @@ if (LLAMA_OPENBLAS)
     endif()
 endif()
 
-if (LLAMA_ALL_WARNINGS)
+if (EVA_ALL_WARNINGS)
     if (NOT MSVC)
         set(c_flags
             -Wall
@@ -143,7 +143,7 @@ if (LLAMA_ALL_WARNINGS)
 
 endif()
 
-if (LLAMA_LTO)
+if (EVA_LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT result OUTPUT output)
     if (result)
@@ -158,16 +158,16 @@ endif()
 #       feel free to update the Makefile for your architecture and send a pull request or issue
 message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
 if (NOT MSVC)
-    if (LLAMA_STATIC)
+    if (EVA_STATIC)
         add_link_options(-static)
         if (MINGW)
             add_link_options(-static-libgcc -static-libstdc++)
         endif()
     endif()
-    if (LLAMA_GPROF)
+    if (EVA_GPROF)
         add_compile_options(-pg)
     endif()
-    if (LLAMA_NATIVE)
+    if (EVA_NATIVE)
         add_compile_options(-march=native)
     endif()
 endif()
@@ -185,20 +185,20 @@ if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm" OR ${CMAKE_SYSTEM_PROCESSOR} MATCHES
 elseif (${CMAKE_SYSTEM_PROCESSOR} MATCHES "^(x86_64|i686|AMD64)$")
     message(STATUS "x86 detected")
     if (MSVC)
-        if (LLAMA_AVX2)
+        if (EVA_AVX2)
             add_compile_options(/arch:AVX2)
-        elseif (LLAMA_AVX)
+        elseif (EVA_AVX)
             add_compile_options(/arch:AVX)
         endif()
     else()
         add_compile_options(-mf16c)
-        if (LLAMA_FMA)
+        if (EVA_FMA)
             add_compile_options(-mfma)
         endif()
-        if (LLAMA_AVX)
+        if (EVA_AVX)
             add_compile_options(-mavx)
         endif()
-        if (LLAMA_AVX2)
+        if (EVA_AVX2)
             add_compile_options(-mavx2)
         endif()
     endif()
@@ -217,7 +217,7 @@ add_library(utils OBJECT
 
 target_include_directories(utils PUBLIC .)
 target_compile_features(utils PUBLIC cxx_std_11) # don't bump
-target_link_libraries(utils PRIVATE ${LLAMA_EXTRA_LIBS})
+target_link_libraries(utils PRIVATE ${EVA_EXTRA_LIBS})
 if (BUILD_SHARED_LIBS)
     set_target_properties(utils PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -228,21 +228,9 @@ add_library(ggml OBJECT
 
 target_include_directories(ggml PUBLIC .)
 target_compile_features(ggml PUBLIC c_std_11) # don't bump
-target_link_libraries(ggml PRIVATE Threads::Threads ${LLAMA_EXTRA_LIBS})
+target_link_libraries(ggml PRIVATE Threads::Threads ${EVA_EXTRA_LIBS})
 if (BUILD_SHARED_LIBS)
     set_target_properties(ggml PROPERTIES POSITION_INDEPENDENT_CODE ON)
-endif()
-
-add_library(llama
-            llama.cpp
-            llama.h)
-
-target_include_directories(llama PUBLIC .)
-target_compile_features(llama PUBLIC cxx_std_11) # don't bump
-target_link_libraries(llama PRIVATE utils ggml ${LLAMA_EXTRA_LIBS})
-if (BUILD_SHARED_LIBS)
-    set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    target_compile_definitions(llama PRIVATE LLAMA_SHARED LLAMA_BUILD)
 endif()
 
 add_library(eva
@@ -262,17 +250,13 @@ endif()
 #
 
 add_executable(main main.cpp)
-target_link_libraries(main PRIVATE eva llama ggml utils)
+target_link_libraries(main PRIVATE eva ggml utils)
 
 #
 # programs, examples and tests
 #
 
-if (LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
+if (EVA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
     enable_testing()
     # add_subdirectory(tests)
 endif ()
-
-#if (LLAMA_BUILD_EXAMPLES)
-#    add_subdirectory(examples)
-#endif()
