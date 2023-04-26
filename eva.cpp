@@ -12,7 +12,6 @@
 #include <fstream>
 #include <random>
 #include <unordered_map>
-#include <unordered_set>
 #include <queue>
 #include <regex>
 #include <cassert>
@@ -546,6 +545,7 @@ static bool eva_model_load(
 
     //tokenize
     std::vector<std::string> labels;
+    std::map<std::string, std::string> cache;
     {
         std::stringstream ss(label_text);
         std::string label;
@@ -563,7 +563,6 @@ static bool eva_model_load(
             //printf("%s\n", l.c_str());
             auto tokens = regex(l);
             for (auto& t : tokens) {
-                std::map<std::string, std::string> cache;
                 t = bpe(t, vocab.bpe_ranks, cache);
                 std::vector<std::string> bpe_tokens;
                 std::stringstream sstream(t);
@@ -967,7 +966,7 @@ static bool eva_model_load(
 static bool eva_eval_internal(
         eva_context & ectx,
         const int   n_threads) {
-    // const int64_t t_start_us = ggml_time_us();
+    const int64_t t_start_us = ggml_time_us();
 
     //const int N = n_tokens;
 
@@ -1547,7 +1546,8 @@ static bool eva_eval_internal(
     for (auto & label_prob : label_probs) {
         fprintf(stderr, "%f\n", label_prob);
     }
-    fprintf(stderr, "\n");
+
+    ectx.t_eval_us += ggml_time_us() - t_start_us;
 
     return true;
 }
@@ -1580,4 +1580,33 @@ int eva_eval(
     }
 
     return 0;
+}
+
+void eva_print_timings(struct eva_context * ctx) {
+    const int64_t t_end_us = ggml_time_us();
+
+    fprintf(stderr, "\n");
+    fprintf(stderr, "%s:     load time = %8.2f ms\n", __func__, ctx->t_load_us / 1000.0f);
+    fprintf(stderr, "%s:     eval time = %8.2f ms\n", __func__, 1e-3f * ctx->t_eval_us);
+    fprintf(stderr, "%s:    total time = %8.2f ms\n", __func__, (t_end_us - ctx->t_start_us)/1000.0f);
+}
+
+const char * eva_print_system_info(void) {
+    static std::string s;
+
+    s  = "";
+    s += "AVX = "       + std::to_string(ggml_cpu_has_avx())       + " | ";
+    s += "AVX2 = "      + std::to_string(ggml_cpu_has_avx2())      + " | ";
+    s += "AVX512 = "    + std::to_string(ggml_cpu_has_avx512())    + " | ";
+    s += "FMA = "       + std::to_string(ggml_cpu_has_fma())       + " | ";
+    s += "NEON = "      + std::to_string(ggml_cpu_has_neon())      + " | ";
+    s += "ARM_FMA = "   + std::to_string(ggml_cpu_has_arm_fma())   + " | ";
+    s += "F16C = "      + std::to_string(ggml_cpu_has_f16c())      + " | ";
+    s += "FP16_VA = "   + std::to_string(ggml_cpu_has_fp16_va())   + " | ";
+    s += "WASM_SIMD = " + std::to_string(ggml_cpu_has_wasm_simd()) + " | ";
+    s += "BLAS = "      + std::to_string(ggml_cpu_has_blas())      + " | ";
+    s += "SSE3 = "      + std::to_string(ggml_cpu_has_sse3())      + " | ";
+    s += "VSX = "       + std::to_string(ggml_cpu_has_vsx())       + " | ";
+
+    return s.c_str();
 }

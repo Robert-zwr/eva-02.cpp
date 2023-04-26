@@ -10,38 +10,19 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <string>
-#include <vector>
-
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <signal.h>
-#include <unistd.h>
-#elif defined (_WIN32)
-#include <signal.h>
-#endif
-
-#if defined (_WIN32)
-#pragma comment(lib,"kernel32.lib")
-extern "C" __declspec(dllimport) void* __stdcall GetStdHandle(unsigned long nStdHandle);
-extern "C" __declspec(dllimport) int __stdcall GetConsoleMode(void* hConsoleHandle, unsigned long* lpMode);
-extern "C" __declspec(dllimport) int __stdcall SetConsoleMode(void* hConsoleHandle, unsigned long dwMode);
-#endif
 
 
 int main(int argc, char ** argv) {
     ggml_time_init();
-    //if (argc != 2) {
-    //std::cerr << "Need 1 argument" << std::endl;
-    //std::cerr << "Usage: ./main image.png" << std::endl;
-    //return 0;
-    //}
-    //std::string src_name(argv[1]);
     eva_params params;
     params.model = "/home/zwr/EVA_env/eva-02.cpp/models/EVA02-CLIP-B-16/ggml-model-f16.bin";
     //params.img = "/home/zwr/EVA_env/eva-02.cpp/temp/image.bin";
     params.img = "/home/zwr/EVA_env/eva-02.cpp/CLIP.png";
     params.text = "a diagram/a dog/a cat";
-    //vector<string> words = {"diagram", "dog", "cat"};
+
+    if (params_parse(argc, argv, params) == false) {
+        return 1;
+    }
 
     eva_context * ctx;
 
@@ -68,6 +49,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    fprintf(stderr, "done\n");
+    eva_print_timings(ctx);
     return 0;
 }
