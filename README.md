@@ -91,8 +91,6 @@ cd eva-02.cpp
 
 ### Build
 
-In order to build llama.cpp you have three different options.
-
 - On Linux or MacOS:
 
   ```bash
@@ -104,7 +102,7 @@ In order to build llama.cpp you have three different options.
 You can download the original EVA02-CLIP-B-16 weights here:[🤗 HF link](https://huggingface.co/QuanSun/EVA-CLIP/blob/main/EVA02_CLIP_B_psz16_s8B.pt) (`286MB`)
 
 ```bash
-# obtain the original EVA02-CLIP-B-16 model weights, and place them in ./models/EVA02-CLIP-B-16
+# obtain the original EVA02-CLIP-B-16 model weight, and place it in ./models/EVA02-CLIP-B-16
 
 # convert the EVA02-CLIP-B-16 model to ggml FP16 format
 python3 convert-pt-to-ggml.py EVA02-CLIP-B-16
@@ -138,5 +136,5 @@ For example, for the sample image "[CLIP.png](https://github.com/Robert-zwr/eva-
 ### TODO
 
 - [ ] Get the accuracy on the Imagenet-1K
-- [ ] support more EVA02-CLIP models
-- [ ] support 4-bit integer quantization
+- [ ] Support more EVA02-CLIP models
+- [ ] Support 4-bit integer quantization
