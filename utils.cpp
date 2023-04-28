@@ -73,8 +73,8 @@ void print_usage(int /*argc*/, char ** argv, const eva_params & params) {
     fprintf(stderr, "  -m FNAME, --model FNAME\n");
     fprintf(stderr, "                        model path (temporarily only support EVA02-CLIP-B-16)");
     fprintf(stderr, "  -i FNAME, --image FNAME     path to a image to be evaluated\n");
-    fprintf(stderr, "  -c 'str1/str2/str3', --caption 'str1/str2/str3'\n");
-    fprintf(stderr, "                        optional captions/labels of the image,spilited by '/',surrounded by '' or \"\"\n");
+    fprintf(stderr, "  -c 'str1,str2,str3', --caption 'str1,str2,str3'\n");
+    fprintf(stderr, "                        optional captions/labels of the image,spilited by ',',surrounded by '' or \"\"\n");
     fprintf(stderr, "  -t N, --threads N     number of threads to use during computation (default: %d)\n", params.n_threads);
     fprintf(stderr, "\n");
 }

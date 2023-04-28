@@ -2269,6 +2269,7 @@ static const char * GGML_OP_LABEL[GGML_OP_COUNT] = {
     "ROPE",
     "CONV_1D_1S",
     "CONV_1D_2S",
+    "CONV_2D_1S",
 
     "FLASH_ATTN",
     "FLASH_FF",
@@ -2280,7 +2281,7 @@ static const char * GGML_OP_LABEL[GGML_OP_COUNT] = {
     "GGML_ROTATE_HALF",
 };
 
-static_assert(GGML_OP_COUNT == 41, "GGML_OP_COUNT != 41");
+static_assert(GGML_OP_COUNT == 42, "GGML_OP_COUNT != 42");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -2321,6 +2322,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rope(x)",
     "conv_1d_1s(x)",
     "conv_1d_2s(x)",
+    "conv_2d_1s(x)",
 
     "flash_attn(x)",
     "flash_ff(x)",
@@ -2332,7 +2334,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rotate_half(x)",
 };
 
-static_assert(GGML_OP_COUNT == 41, "GGML_OP_COUNT != 41");
+static_assert(GGML_OP_COUNT == 42, "GGML_OP_COUNT != 42");
 
 //
 // ggml object
@@ -4371,6 +4373,26 @@ struct ggml_tensor * ggml_conv_1d_2s(
 
     result->op   = GGML_OP_CONV_1D_2S;
     result->grad = is_node ? ggml_dup_tensor(ctx, result) : NULL;
+    result->src0 = a;
+    result->src1 = b;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_conv_2d(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a, //[768,3,16,16]
+        struct ggml_tensor  * b, //[3,224,224]
+        int                   dim1, //768
+        int                   dim0) {//196
+    GGML_ASSERT(a->ne[2] == b->ne[2]);
+    GGML_ASSERT(b->ne[3] == 1);
+
+    const int ne[4] = {dim1, dim0, 1, 1, };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 2, ne);
+
+    result->op   = GGML_OP_CONV_2D;
+    result->grad = ggml_dup_tensor(ctx, result);
     result->src0 = a;
     result->src1 = b;
 
@@ -8326,6 +8348,86 @@ static void ggml_compute_forward_conv_1d_2s(
     }
 }
 
+static void ggml_compute_forward_conv_2d_f16_f32(
+        const struct ggml_compute_params * params,
+        const struct ggml_tensor * src0, //model.vision_model.patch_embed_weight
+        const struct ggml_tensor * src1, //ectx.image
+              struct ggml_tensor * dst) {
+    //struct ggml_tensor  * a, //[768,3,16,16]
+    //struct ggml_tensor  * b, //[3,224,224]
+    //int                   dim1, //768
+    //int                   dim0) {//196
+    GGML_ASSERT(params->ith == 0);
+    GGML_ASSERT(src0->type == GGML_TYPE_F16);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32);
+
+    const int ne00 = src0->ne[0]; //16
+    //const int ne01 = src0->ne[1]; //16
+    //const int ne02 = src0->ne[2]; //3
+    const int ne03 = src0->ne[3]; //768
+
+    //const int nb0 = src0->nb[0]; 
+    //const int nb1 = src0->nb[1]; 
+    //const int nb2 = src0->nb[2]; 
+
+    const int ne10 = src1->ne[0]; //224
+    //const int ne11 = src1->ne[1]; //224
+    //const int ne12 = src1->ne[2]; //3
+
+    const int patch_size = ne00;
+    const int vision_width = ne03;
+    const int patch_num = ne10/ne00;
+    const int image_size = ne10;
+
+    if (params->type == GGML_TASK_INIT || params->type == GGML_TASK_FINALIZE) {
+        return;
+    }
+
+    uint16_t * conv_kernel = (uint16_t*)malloc(patch_size*patch_size*3*sizeof(uint16_t));
+    uint16_t * patch = (uint16_t*)malloc(patch_size*patch_size*3*sizeof(uint16_t));
+    const int n = ggml_up32(patch_size*patch_size*3);
+    for (int i = 0; i < vision_width; i++) {
+        memcpy(conv_kernel, (unsigned short*)(src0->data)+i*3*patch_size*patch_size, patch_size*patch_size*3*sizeof(unsigned short));
+        //float bias = ggml_fp16_to_fp32(*((unsigned short*)(model.vision_model.patch_embed_bias->data)+i));
+        for (int j = 0; j < patch_num*patch_num; j++){
+            for (int c = 0; c < 3; c++){
+                for (int k = 0; k < patch_size; k++){
+                    for (int m = 0; m < patch_size; m++){
+                        patch[c*patch_size*patch_size+k*patch_size+m] = ggml_fp32_to_fp16(*(((float*)(src1->data))+(j/patch_num)*image_size*patch_size+(j%patch_num)*patch_size+c*image_size*image_size+k*image_size+m));
+                    }
+                }
+            }
+            float v = 0.0f;
+            ggml_vec_dot_f16(n, &v, conv_kernel, patch);
+            //v += bias;
+            memcpy((float*)(dst->data)+j*vision_width+i, &v, sizeof(float));
+        }
+    }
+}
+
+static void ggml_compute_forward_conv_2d(
+        const struct ggml_compute_params * params,
+        const struct ggml_tensor * src0,
+        const struct ggml_tensor * src1,
+        struct ggml_tensor * dst) {
+    switch (src0->type) {
+        case GGML_TYPE_F16:
+            {
+                ggml_compute_forward_conv_2d_f16_f32(params, src0, src1, dst);
+            } break;
+        case GGML_TYPE_F32:
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_I8:
+        case GGML_TYPE_I16:
+        case GGML_TYPE_I32:
+        case GGML_TYPE_COUNT:
+            {
+                GGML_ASSERT(false);
+            } break;
+    }
+}
+
 // ggml_compute_forward_flash_attn
 
 static void ggml_compute_forward_flash_attn_f32(
@@ -9040,7 +9142,7 @@ static void ggml_compute_forward_split_get_first_f32(
     const int axis = ((int32_t *) src1->data)[0];
     const int n_dim = ((int32_t *) src1->data)[1];
 
-    const int ne00 = src0->ne[0]; //64
+    //const int ne00 = src0->ne[0]; //64
     const int ne01 = src0->ne[1]; //197
     const int ne02 = src0->ne[2]; //12
     const int ne03 = src0->ne[3]; //1
@@ -9050,12 +9152,12 @@ static void ggml_compute_forward_split_get_first_f32(
     const size_t nb02 = src0->nb[2];
     const size_t nb03 = src0->nb[3];
 
-    const int ne10 = dst->ne[0]; 
-    const int ne11 = dst->ne[1]; 
-    const int ne12 = dst->ne[2]; 
-    const int ne13 = dst->ne[3]; 
+    //const int ne10 = dst->ne[0]; 
+    //const int ne11 = dst->ne[1]; 
+    //const int ne12 = dst->ne[2]; 
+    //const int ne13 = dst->ne[3]; 
 
-    const size_t nb10 = dst->nb[0];
+    //const size_t nb10 = dst->nb[0];
     const size_t nb11 = dst->nb[1];
     const size_t nb12 = dst->nb[2];
     const size_t nb13 = dst->nb[3];
@@ -9138,7 +9240,7 @@ static void ggml_compute_forward_split_get_second_f32(
     const int axis = ((int32_t *) src1->data)[0];
     const int n_dim = ((int32_t *) src1->data)[1];
 
-    const int ne00 = src0->ne[0]; //64
+    //const int ne00 = src0->ne[0]; //64
     const int ne01 = src0->ne[1]; //197
     const int ne02 = src0->ne[2]; //12
     const int ne03 = src0->ne[3]; //1
@@ -9148,12 +9250,12 @@ static void ggml_compute_forward_split_get_second_f32(
     const size_t nb02 = src0->nb[2];
     const size_t nb03 = src0->nb[3];
 
-    const int ne10 = dst->ne[0]; 
-    const int ne11 = dst->ne[1]; 
-    const int ne12 = dst->ne[2]; 
-    const int ne13 = dst->ne[3]; 
+    //const int ne10 = dst->ne[0]; 
+    //const int ne11 = dst->ne[1]; 
+    //const int ne12 = dst->ne[2]; 
+    //const int ne13 = dst->ne[3]; 
 
-    const size_t nb10 = dst->nb[0];
+    //const size_t nb10 = dst->nb[0];
     const size_t nb11 = dst->nb[1];
     const size_t nb12 = dst->nb[2];
     const size_t nb13 = dst->nb[3];
@@ -9233,8 +9335,8 @@ static void ggml_compute_forward_cat_f32(
         return;
     }
 
-    const int ne0 = src0->ne[0]; //64
-    const int ne01 = src0->ne[1]; //1
+    //const int ne0 = src0->ne[0]; //64
+    //const int ne01 = src0->ne[1]; //1
     const int ne2 = src0->ne[2]; //12
     const int ne3 = src0->ne[3]; //1
 
@@ -9243,14 +9345,14 @@ static void ggml_compute_forward_cat_f32(
     const size_t nb02 = src0->nb[2];
     const size_t nb03 = src0->nb[3];
 
-    const int ne11 = src1->ne[1]; //196
+    //const int ne11 = src1->ne[1]; //196
 
     //const size_t nb10 = src1->nb[0];
     //const size_t nb11 = src1->nb[1];
     const size_t nb12 = src1->nb[2];
     const size_t nb13 = src1->nb[3];
 
-    const size_t ne21 = dst->ne[1]; //197
+    //const size_t ne21 = dst->ne[1]; //197
 
     //const size_t nb20 = dst->nb[0];
     //const size_t nb21 = dst->nb[1];
@@ -9304,9 +9406,9 @@ static void ggml_compute_forward_rotate_half_f32(
     const int ne1 = src0->ne[1]; //196
     const int ne2 = src0->ne[2]; //12
 
-    const int nb0 = src0->nb[0];
-    const int nb1 = src0->nb[1];
-    const int nb2 = src0->nb[2];
+    //const int nb0 = src0->nb[0];
+    //const int nb1 = src0->nb[1];
+    //const int nb2 = src0->nb[2];
 
     if (params->type == GGML_TASK_INIT || params->type == GGML_TASK_FINALIZE) {
         return;
@@ -9483,6 +9585,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_CONV_1D_2S:
             {
                 ggml_compute_forward_conv_1d_2s(params, tensor->src0, tensor->src1, tensor);
+            } break;
+        case GGML_OP_CONV_2D:
+            {
+                ggml_compute_forward_conv_2d(params, tensor->src0, tensor->src1, tensor);
             } break;
         case GGML_OP_FLASH_ATTN:
             {
@@ -9762,6 +9868,10 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
                 GGML_ASSERT(false); // TODO: not implemented
             } break;
         case GGML_OP_CONV_1D_2S:
+            {
+                GGML_ASSERT(false); // TODO: not implemented
+            } break;
+        case GGML_OP_CONV_2D:
             {
                 GGML_ASSERT(false); // TODO: not implemented
             } break;
@@ -10308,6 +10418,7 @@ void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph) 
                 case GGML_OP_SPLIT_GET_SECOND:
                 case GGML_OP_CAT:
                 case GGML_OP_ROTATE_HALF:
+                case GGML_OP_CONV_2D:
                 case GGML_OP_NONE:
                     {
                         node->n_tasks = 1;
@@ -11533,10 +11644,4 @@ int ggml_cpu_has_vsx(void) {
 #else
     return 0;
 #endif
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void ggml_vector_dot_f16(const int n, float * s, uint16_t * a, uint16_t * b){
-    ggml_vec_dot_f16(n, s, a, b);
 }

@@ -275,12 +275,26 @@ std::string whitespace_clean_and_tolower(std::string text) {
 std::vector<std::string> regex(const std::string& text) {
     std::vector<std::string> tokens;
     // Match the pattern using regex
-    std::regex pattern(R"([^\s\p{L}\p{N}]+)");
+    std::regex pattern(R"(([^\s()-]+)|([()-])|(-))");
+    
     std::smatch match;
     std::string::const_iterator search_start(text.cbegin());
     while (std::regex_search(search_start, text.cend(), match, pattern)) {
         if (match[0].length() > 0) {
-            tokens.push_back(match[0]);
+            //tokens.push_back(match[0]);
+            const std::string temp = match[0];
+            int len = temp.length();
+            if (temp[len-1]=='s' && temp[len-2]=='\''){
+                const std::string temp1 = temp.substr(0,len-2);
+                tokens.push_back(temp1);
+                tokens.push_back("\'s");
+            }
+            else if (temp[len-1]=='.'){
+                const std::string temp1 = temp.substr(0,len-1);
+                tokens.push_back(temp1);
+                tokens.push_back(".");
+            }
+            else tokens.push_back(match[0]);
         }
         search_start = match.suffix().first;
     }
@@ -371,31 +385,9 @@ static bool eva_model_load(
     auto & image = ectx.image;
     auto & text  = ectx.text;
     auto & vocab = ectx.vocab;
-    /*
-    //load image
-    auto fin = std::ifstream(image_path, std::ios::binary);
-    fin.rdbuf()->pubsetbuf(f_buf.data(), f_buf.size());
-    if (!fin) {
-        fprintf(stderr, "%s: failed to open '%s'\n", __func__, image_path.c_str());
-        return false;
-    }
-    int32_t dims;
-    fin.read(reinterpret_cast<char *>(&dims), sizeof(dims));
-    if (dims != 3) {
-        fprintf(stderr, "%s: image tensor has wrong size in image file: got %d, expected %d\n",
-                __func__, dims, 3);
-        return false;
-    }
-    int32_t nelements = 1;
-    int32_t ne[4] = {1, 1, 1, 1};
-    for (int i = 0; i < dims; ++i) {
-        fin.read(reinterpret_cast<char *>(&ne[i]), sizeof(ne[i]));
-        nelements *= ne[i];
-    }
-    static size_t image_buf_size = 1.2*ne[0]*ne[1]*ne[2]*ggml_type_sizef(GGML_TYPE_F32);
-    static void * image_buf = malloc(image_buf_size);*/
+
     const int img_size = model.hparams.vision_hparams.image_size;
-    static size_t image_buf_size = 1.2*img_size*img_size*3*ggml_type_sizef(GGML_TYPE_F32);
+    static size_t image_buf_size = 2*img_size*img_size*3*ggml_type_sizef(GGML_TYPE_F32);
     static void * image_buf = malloc(image_buf_size);
     struct ggml_init_params params = {
         /*.mem_size   =*/ image_buf_size,
@@ -405,8 +397,6 @@ static bool eva_model_load(
     image = ggml_new_tensor_3d(ctx_src, GGML_TYPE_F32, img_size, img_size, 3);
     auto preprocessed_image = image_preprosess(image_path, img_size);
     memcpy(image->data, preprocessed_image, ggml_nbytes(image));
-    //fin.read(reinterpret_cast<char *>(image->data), ggml_nbytes(image));
-    //fin.close();
 
     auto fin = std::ifstream(fname, std::ios::binary);
     fin.rdbuf()->pubsetbuf(f_buf.data(), f_buf.size());
@@ -549,7 +539,7 @@ static bool eva_model_load(
     {
         std::stringstream ss(label_text);
         std::string label;
-        while (getline(ss, label, '/')) {
+        while (getline(ss, label, ',')) {
             labels.push_back(whitespace_clean_and_tolower(label));
         }
 
@@ -1021,34 +1011,20 @@ static bool eva_eval_internal(
     vision_gf.n_threads = n_threads;
 
     struct ggml_context * ctx0 = ggml_init(vision_params);
-    struct ggml_tensor * vision_proj = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num);
-    uint16_t * conv_kernel = (uint16_t*)malloc(patch_size*patch_size*3*sizeof(uint16_t));
-    uint16_t * patch = (uint16_t*)malloc(patch_size*patch_size*3*sizeof(uint16_t));
-    const int n = ((patch_size*patch_size*3+31) & ~31);
-    for (int i = 0; i < vision_width; i++) {
-        memcpy(conv_kernel, (unsigned short*)(model.vision_model.patch_embed_weight->data)+i*3*patch_size*patch_size, patch_size*patch_size*3*sizeof(unsigned short));
-        float bias = ggml_fp16_to_fp32(*((unsigned short*)(model.vision_model.patch_embed_bias->data)+i));
-        for (int j = 0; j < patch_num*patch_num; j++){
-            for (int c = 0; c < 3; c++){
-                for (int k = 0; k < patch_size; k++){
-                    for (int m = 0; m < patch_size; m++){
-                        patch[c*patch_size*patch_size+k*patch_size+m] = ggml_fp32_to_fp16(*(((float*)(ectx.image->data))+(j/patch_num)*image_size*patch_size+(j%patch_num)*patch_size+c*image_size*image_size+k*image_size+m));
-                    }
-                }
-            }
-            float v = 0.0f;
-            ggml_vector_dot_f16(n, &v, conv_kernel, patch);
-            v += bias;
-            memcpy((float*)(vision_proj->data)+j*vision_width+i, &v, sizeof(float));
-        }
-    }
-    //x = torch.cat((cls_tokens, x), dim=1)
-    struct ggml_tensor * vision_proj_with_cls_token = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num+1);
-    //memcpy(vision_proj_cls->data, model.vision_model.cls_token->data, vision_width*sizeof(float));
+    //x = self.patch_embed(x)
+    struct ggml_tensor * vision_proj_tmp = ggml_conv_2d(ctx0, model.vision_model.patch_embed_weight, ectx.image, vision_width, patch_num*patch_num);
+    struct ggml_tensor * conv_bias = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
     for (int i = 0; i < vision_width; i++){
-        *((float*)(vision_proj_with_cls_token->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.cls_token->data)+i));
+        *((float*)(conv_bias->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.patch_embed_bias->data)+i));
     }
-    memcpy((float*)(vision_proj_with_cls_token->data)+vision_width, vision_proj->data, vision_width*patch_num*patch_num*sizeof(float));
+    struct ggml_tensor * conv_bias_broadcast = ggml_repeat(ctx0, conv_bias, vision_proj_tmp);
+    struct ggml_tensor * vision_proj = ggml_add(ctx0, vision_proj_tmp, conv_bias_broadcast);
+    //x = torch.cat((cls_tokens, x), dim=1)
+    struct ggml_tensor * vision_cls_token = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, vision_width);
+    for (int i = 0; i < vision_width; i++){
+        *((float*)(vision_cls_token->data)+i) = ggml_fp16_to_fp32(*((uint16_t*)(model.vision_model.cls_token->data)+i));
+    }
+    struct ggml_tensor * vision_proj_with_cls_token = ggml_cat(ctx0, vision_cls_token, vision_proj);
     //x = x + position_embeddings
     struct ggml_tensor * vision_pos_embeddings = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, vision_width, patch_num*patch_num+1);
     for (int i = 0; i < vision_width; i++){

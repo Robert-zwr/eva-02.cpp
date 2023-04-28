@@ -248,6 +248,7 @@ enum ggml_op {
     GGML_OP_ROPE,
     GGML_OP_CONV_1D_1S,
     GGML_OP_CONV_1D_2S,
+    GGML_OP_CONV_2D, ////
 
     GGML_OP_FLASH_ATTN,
     GGML_OP_FLASH_FF,
@@ -622,6 +623,13 @@ struct ggml_tensor * ggml_conv_1d_2s(
         struct ggml_tensor  * a,
         struct ggml_tensor  * b);
 
+struct ggml_tensor * ggml_conv_2d(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        int                   dim1,
+        int                   dim0);
+
 struct ggml_tensor * ggml_flash_attn(
         struct ggml_context * ctx,
         struct ggml_tensor  * q,
@@ -657,8 +665,6 @@ struct ggml_tensor * ggml_cat(
 struct ggml_tensor * ggml_rotate_half(
         struct ggml_context * ctx,
         struct ggml_tensor  * a);
-
-void ggml_vector_dot_f16(const int n, float * s, uint16_t * a, uint16_t * b);
 
 //
 // automatic differentiation

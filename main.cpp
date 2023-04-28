@@ -17,7 +17,7 @@ int main(int argc, char ** argv) {
     params.model = "./models/EVA02-CLIP-B-16/ggml-model-f16.bin";
     //params.img = "./temp/image.bin";
     params.img = "CLIP.png";
-    params.text = "a diagram/a dog/a cat";
+    params.text = "a diagram,a dog,a cat";
 
     if (params_parse(argc, argv, params) == false) {
         return 1;
