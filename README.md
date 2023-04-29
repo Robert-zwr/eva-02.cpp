@@ -85,7 +85,7 @@ Here are the steps for the EVA02-CLIP-B-16 model.
 ### Get the Code
 
 ```bash
-git https://github.com/Robert-zwr/eva-02.cpp
+git clone https://github.com/Robert-zwr/eva-02.cpp
 cd eva-02.cpp
 ```
 
