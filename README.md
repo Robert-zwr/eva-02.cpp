@@ -112,6 +112,7 @@ cd ../..
 python3 convert-pt-to-ggml.py EVA02-CLIP-B-16
 
 # run the inference
+# run ./main -h to learn about optional parameters
 ./main
 ```
 
