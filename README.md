@@ -104,6 +104,7 @@ You can download the original EVA02-CLIP-B-16 weights here:[🤗 HF link](https:
 ```bash
 # obtain the original EVA02-CLIP-B-16 model weight, and place it in ./models/EVA02-CLIP-B-16
 mkdir -p models/EVA02-CLIP-B-16
+cd models/EVA02-CLIP-B-16
 wget https://huggingface.co/QuanSun/EVA-CLIP/resolve/main/EVA02_CLIP_B_psz16_s8B.pt
 cd ../..
 
