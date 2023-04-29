@@ -103,6 +103,9 @@ You can download the original EVA02-CLIP-B-16 weights here:[🤗 HF link](https:
 
 ```bash
 # obtain the original EVA02-CLIP-B-16 model weight, and place it in ./models/EVA02-CLIP-B-16
+mkdir -p models/EVA02-CLIP-B-16
+wget https://huggingface.co/QuanSun/EVA-CLIP/resolve/main/EVA02_CLIP_B_psz16_s8B.pt
+cd ../..
 
 # convert the EVA02-CLIP-B-16 model to ggml FP16 format
 python3 convert-pt-to-ggml.py EVA02-CLIP-B-16
